@@ -4,6 +4,16 @@
 (LGPL-3.0) на RED OS 8 + podman + Caddy. Алерты Graylog попадают в IRIS
 автоматически через [TicketBridge](https://github.com/ArsIS-02/ticketbridge).
 
+## Скриншоты
+
+![Дашборд DFIR-IRIS](docs/screenshots/dashboard.png)
+
+| Очередь алертов | Детали алерта |
+|---|---|
+| ![Очередь алертов](docs/screenshots/alerts.png) | ![Детали алерта](docs/screenshots/alert-detail.png) |
+
+![Сводка кейса расследования](docs/screenshots/case.png)
+
 ## Стек
 
 - iriswebapp_db (PostgreSQL), iriswebapp_app, iriswebapp_worker,
