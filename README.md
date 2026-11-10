@@ -85,6 +85,36 @@ WantedBy=default.target
 - Интеграция Graylog: TicketBridge (`TB_IRIS_URL`, `TB_IRIS_KEY`) дублирует
   каждый High-алерт в IRIS; severity: Graylog 3→High(5), 2→Medium(1), 1→Low(4).
 
+## Тестовая миграция v3 (11.11.2026)
+
+Основной экземпляр остаётся на стабильной **v2.4.29**. Изолированный стенд
+**v3.0.0-beta.23** запущен на `https://iris-next.apps.monitoring.test`
+(порт 8102, каталог `~/dfir-iris-v3-test`, compose `docker-compose.v3-test.yml`).
+Контейнеры, сети и тома имеют префикс `iris3test` / `dfir-iris-v3-test` и не
+используют данные основного экземпляра.
+
+Проверено: PostgreSQL 18.6, исходные 13 алертов и 1 кейс, вход существующего
+пользователя, `pgcrypto 1.4`, создание алерта TicketBridge через
+`POST /api/v2/alerts` и его отображение в новой очереди Alerts. Резервная копия
+PG12 находится в `~/dfir-iris-v3-test/backups/`.
+
+Особенность миграции: ревизия v2.4.29 `e5d79b8c4a55` отсутствует в графе
+v3.0.0-beta.23. На **тестовой копии** счётчик был возвращён к общему предку
+`d5a720d1b99b`, после чего штатные миграции v3 успешно применились, включая
+`c7f1e2a4d810`, которая адаптирует уже существующие таблицы дашбордов.
+Итоговая ревизия — `a6d3f8b2c917`. Не повторять это на основном экземпляре без
+нового бэкапа, остановки стека и проверки совместимости всех интеграций.
+
+```bash
+cd ~/dfir-iris-v3-test
+podman-compose -f docker-compose.yml ps
+podman-compose -f docker-compose.yml up -d
+podman-compose -f docker-compose.yml down   # без -v: сохранить тестовую БД
+```
+
+Для TicketBridge v3 задаётся `TB_IRIS_API_PATH=/api/v2/alerts`; основной
+TicketBridge продолжает использовать endpoint v2 `/alerts/add`.
+
 ## Грабли, которые уже встречались
 
 1. `IRIS_WORKER=1` в `.env` → приложение не стартует CSRF («A secret key is required»).

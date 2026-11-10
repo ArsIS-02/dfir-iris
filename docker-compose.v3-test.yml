@@ -1,0 +1,167 @@
+# DFIR-IRIS v3.0.0-beta.23 — изолированный стенд миграции.
+# Не использовать для основного экземпляра: отдельные контейнеры, сети, тома и порт 8102.
+services:
+  rabbitmq:
+    image: docker.io/library/rabbitmq:3-management-alpine
+    container_name: iris3test_rabbitmq
+    user: rabbitmq
+    restart: always
+    networks:
+      - iris_backend
+    healthcheck:
+      test: rabbitmq-diagnostics check_port_connectivity || exit 1
+      start_period: 60s
+      interval: 5s
+
+  db:
+    image: ghcr.io/dfir-iris/iris-db:v3.0.0-beta.23
+    container_name: iris3test_db
+    restart: always
+    environment:
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+      - POSTGRES_ADMIN_USER
+      - POSTGRES_ADMIN_PASSWORD
+      - POSTGRES_DB
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    networks:
+      - iris_backend
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: pg_isready -U postgres -d iris_db || exit 1
+      start_period: 60s
+      interval: 5s
+
+  app:
+    image: ghcr.io/dfir-iris/iris-backend:v3.0.0-beta.23
+    container_name: iris3test_app
+    command: ["./iris-entrypoint.sh", "iriswebapp"]
+    restart: always
+    depends_on:
+      - db
+      - rabbitmq
+    env_file:
+      - .env
+    environment:
+      - LOG_LEVEL
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+      - POSTGRES_ADMIN_USER
+      - POSTGRES_ADMIN_PASSWORD
+      - POSTGRES_SERVER
+      - POSTGRES_PORT
+      - IRIS_SECRET_KEY
+      - IRIS_SECURITY_PASSWORD_SALT
+      - REQUESTS_CA_BUNDLE
+      - SSL_CERT_FILE
+    volumes:
+      - ./certificates/:/home/iris/certificates/:ro
+      - ./certificates/ldap/:/iriswebapp/certificates/ldap/:ro
+      - ./certificates/ca-bundle/:/etc/iris-ca/:ro
+      - iris-downloads:/home/iris/downloads
+      - user_templates:/home/iris/user_templates
+      - server_data:/home/iris/server_data
+    networks:
+      - iris_backend
+      - iris_frontend
+    healthcheck:
+      test: curl --head --fail http://localhost:8000 || exit 1
+      start_period: 240s
+      interval: 5s
+
+  worker:
+    image: ghcr.io/dfir-iris/iris-backend:v3.0.0-beta.23
+    container_name: iris3test_worker
+    restart: always
+    command: ["./wait-for-iriswebapp.sh", "app:8000", "./iris-entrypoint.sh", "iris-worker"]
+    depends_on:
+      - app
+      - db
+      - rabbitmq
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+      - POSTGRES_ADMIN_USER
+      - POSTGRES_ADMIN_PASSWORD
+      - POSTGRES_SERVER
+      - POSTGRES_PORT
+      - IRIS_SECRET_KEY
+      - IRIS_SECURITY_PASSWORD_SALT
+      - IRIS_WORKER
+      - LOG_LEVEL
+      - REQUESTS_CA_BUNDLE
+      - SSL_CERT_FILE
+    volumes:
+      - ./certificates/:/home/iris/certificates/:ro
+      - ./certificates/ldap/:/iriswebapp/certificates/ldap/:ro
+      - ./certificates/ca-bundle/:/etc/iris-ca/:ro
+      - iris-downloads:/home/iris/downloads
+      - user_templates:/home/iris/user_templates
+      - server_data:/home/iris/server_data
+    networks:
+      - iris_backend
+
+  frontend:
+    image: ghcr.io/dfir-iris/iris-frontend:v3.0.0-beta.23
+    container_name: iris3test_frontend
+    restart: always
+    environment:
+      - PUBLIC_EXTERNAL_API_URL=https://iris-next.apps.monitoring.test
+      - PUBLIC_INTERNAL_API_URL=http://app:8000
+      - PUBLIC_USE_MOCK_API_DATA=false
+      - PROTOCOL_HEADER=x-forwarded-proto
+      - HOST_HEADER=x-forwarded-host
+      - IRIS_ALLOW_ORIGIN
+      - NODE_ENV=production
+      - BODY_SIZE_LIMIT=Infinity
+    networks:
+      - iris_backend
+      - iris_frontend
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:5173/', { maxHeaderSize: 131072 }, r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"]
+      start_period: 30s
+      interval: 5s
+
+  nginx:
+    image: ghcr.io/dfir-iris/iris-nginx:v3.0.0-beta.23
+    container_name: iris3test_nginx
+    restart: always
+    depends_on:
+      - app
+      - frontend
+    environment:
+      - IRIS_UPSTREAM_SERVER=app
+      - IRIS_UPSTREAM_PORT=8000
+      - IRIS_FRONTEND_SERVER=frontend
+      - IRIS_FRONTEND_PORT=5173
+      - INTERFACE_HTTPS_PORT=443
+      - SERVER_NAME=iris-next.apps.monitoring.test
+      - CERT_FILENAME
+      - KEY_FILENAME
+      - IRIS_AUTHENTICATION_TYPE
+      - IRIS_CERT_RELOAD_INTERVAL=60
+    ports:
+      - "8102:443"
+    volumes:
+      - "./certificates/web_certificates/:/www/certs/:ro"
+    networks:
+      - iris_frontend
+
+volumes:
+  db_data:
+    name: dfir-iris-v3-test_db_data
+  iris-downloads:
+    name: dfir-iris-v3-test_iris-downloads
+  user_templates:
+    name: dfir-iris-v3-test_user_templates
+  server_data:
+    name: dfir-iris-v3-test_server_data
+
+networks:
+  iris_backend:
+    name: iris3test_backend
+  iris_frontend:
+    name: iris3test_frontend
