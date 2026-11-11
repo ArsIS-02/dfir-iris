@@ -79,7 +79,14 @@ class NotificationMailTest(unittest.TestCase):
         return SimpleNamespace(
             alert_id=14,
             alert_title='AUDIT - Изменение файлов учётных записей',
-            alert_description='Проверка <b>оформления</b> и переноса текста.',
+            alert_description=(
+                '<b>AUDIT - Изменение файлов учётных записей</b><br>'
+                'Время: 2026-11-10T20:48:55.212Z<br>Приоритет: 3<br><br>'
+                '<table><tr><td style="color:#888">event</td>'
+                '<td>audit: PATH item=0 name=&quot;/etc/group&quot; inode=1704016</td>'
+                '</tr></table><br><a href="https://homewiki.apps.monitoring.test/rules/'
+                '6af0c56861b983feab6a56cc">📖 Разбор в HomeWiki</a>'
+            ),
             alert_source='Graylog',
             alert_source_ref='6af0c56861b983feab6a56cc',
             alert_source_link='https://graylog.apps.monitoring.test/alerts/EVENT/replay-search',
@@ -96,6 +103,7 @@ class NotificationMailTest(unittest.TestCase):
                 'id': 'EVENT',
                 'event_definition_id': '6af0c56861b983feab6a56cc',
                 'message': 'Событие <script>alert(1)</script>',
+                'group_by_fields': {'source': 'home.apps.monitoring.test'},
                 'fields': {
                     'source': 'redos-server',
                     'access_token': 'не должно попасть в письмо',
@@ -116,22 +124,38 @@ class NotificationMailTest(unittest.TestCase):
         content = self.mail._notification_content(self._notification())
         self.assertEqual(content['event_label'], 'Вам назначен алерт')
         self.assertEqual(content['severity']['code'], 'HIGH')
-        self.assertEqual(content['fields'][1]['value'], 'Новый')
+        self.assertEqual(content['fields'][0]['label'], 'Хост')
+        self.assertEqual(content['fields'][0]['value'], 'home.apps.monitoring.test')
+        self.assertEqual(content['fields'][2]['value'], 'Новый')
+        self.assertEqual(content['fields'][4]['label'], 'Время уведомления')
+        self.assertIn('11.11.2026 11:00:00', content['fields'][4]['value'])
+        self.assertIn('Екатеринбург (UTC+05:00)', content['fields'][4]['value'])
+        self.assertEqual(content['fields'][5]['label'], 'Время исходного события')
         self.assertEqual(content['iris_url'], 'https://iris.apps.monitoring.test/alerts/14')
         self.assertIn('homewiki.apps.monitoring.test/rules/', content['homewiki_url'])
         self.assertFalse(any('password' in field['label'] for field in content['technical_fields']))
+        self.assertNotIn('<b>', content['description'])
+        self.assertNotIn('<table>', content['description'])
+        self.assertNotIn('Время: 2026-11-10T20:48:55.212Z', content['description'])
+        self.assertNotIn('Приоритет: 3', content['description'])
+        self.assertNotIn('Разбор в HomeWiki', content['description'])
+        self.assertIn('Событие:\naudit: PATH item=0 name="/etc/group"', content['description'])
 
         html = self.mail.app.jinja_env.get_template('email/notification.html').render(**content)
         self.assertIn('IRIS HOMELAB', html)
+        self.assertIn('ОПИСАНИЕ СОБЫТИЯ', html)
         self.assertIn('Открыть в IRIS', html)
         self.assertIn('Источник в Graylog', html)
         self.assertIn('Разбор в HomeWiki', html)
-        self.assertIn('&lt;b&gt;оформления&lt;/b&gt;', html)
+        self.assertNotIn('&lt;b&gt;', html)
+        self.assertNotIn('&lt;br&gt;', html)
+        self.assertNotIn('&lt;table&gt;', html)
         self.assertIn('&lt;script&gt;alert(1)&lt;/script&gt;', html)
         self.assertNotIn('<script>alert(1)</script>', html)
         self.assertNotIn('не должно попасть в письмо', html)
 
         plain = self.mail._plain_text(content)
+        self.assertIn('Хост: home.apps.monitoring.test', plain)
         self.assertIn('Критичность: HIGH · высокая', plain)
         self.assertIn('Статус: Новый', plain)
         self.assertIn('Открыть в IRIS:', plain)

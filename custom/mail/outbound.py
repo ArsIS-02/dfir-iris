@@ -144,6 +144,70 @@ def send_email(to: Sequence[str],
     return True
 
 
+def _description_text(value: Any, title: str = '') -> str:
+    """Turn the limited HTML produced by integrations into readable plain text.
+
+    We intentionally do not mark source HTML as safe: event data is untrusted.
+    HTMLParser keeps structural line breaks and discards every tag/attribute.
+    """
+    raw = _text(value)
+    if not raw:
+        return ''
+    from html.parser import HTMLParser
+
+    class TextExtractor(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.parts: list[str] = []
+
+        def _break(self):
+            self.parts.append('\n')
+
+        def handle_starttag(self, tag, attrs):
+            if tag in ('br', 'p', 'div', 'tr', 'table', 'td', 'th', 'li',
+                       'h1', 'h2', 'h3', 'h4', 'pre'):
+                self._break()
+
+        def handle_endtag(self, tag):
+            if tag in ('p', 'div', 'tr', 'table', 'li',
+                       'h1', 'h2', 'h3', 'h4', 'pre'):
+                self._break()
+
+        def handle_data(self, data):
+            self.parts.append(data)
+
+    parser = TextExtractor()
+    try:
+        parser.feed(raw)
+        parser.close()
+        extracted = ''.join(parser.parts)
+    except Exception:
+        # Malformed integration HTML must not prevent the notification.
+        extracted = re.sub(r'<[^>]*>', '\n', raw)
+
+    lines: list[str] = []
+    for source_line in extracted.replace('\r', '').split('\n'):
+        line = re.sub(r'[ \t\xa0]+', ' ', source_line).strip()
+        if not line:
+            if lines and lines[-1] != '':
+                lines.append('')
+            continue
+        if title and not lines and line.strip() == title.strip():
+            continue
+        if re.match(r'^Время:\s*\d{4}-\d{2}-\d{2}T', line):
+            continue
+        if re.fullmatch(r'Приоритет:\s*[123]', line):
+            continue
+        if 'Разбор в HomeWiki' in line:
+            continue
+        if line.lower() == 'event':
+            line = 'Событие:'
+        lines.append(line)
+    while lines and lines[-1] == '':
+        lines.pop()
+    return '\n'.join(lines)
+
+
 def _without_sensitive(value: Any) -> Any:
     """Recursively remove secret-looking keys before JSON reaches an email."""
     if isinstance(value, dict):
@@ -212,9 +276,11 @@ def _format_time(value: Any) -> str:
         moment = moment.replace(tzinfo=timezone.utc)
     try:
         moment = moment.astimezone(ZoneInfo('Asia/Yekaterinburg'))
+        offset = moment.strftime('%z')
+        offset = f'{offset[:3]}:{offset[3:]}'
+        return moment.strftime('%d.%m.%Y %H:%M:%S') + f' · Екатеринбург (UTC{offset})'
     except (ValueError, OSError):
-        pass
-    return moment.strftime('%d.%m.%Y %H:%M:%S %Z (UTC%z)')
+        return moment.strftime('%d.%m.%Y %H:%M:%S %Z (UTC%z)')
 
 
 def _object_name(obj: Any, attributes: Sequence[str]) -> str:
@@ -243,6 +309,26 @@ def _severity(value: Any) -> dict[str, str]:
 def _status(value: Any) -> str:
     original = _text(value, '—')
     return _STATUSES.get(original.lower(), original)
+
+
+def _alert_host(alert: Any) -> str:
+    """Resolve the originating host before falling back to Graylog's source."""
+    source_content = getattr(alert, 'alert_source_content', None) or {}
+    if not isinstance(source_content, dict):
+        return ''
+    mappings = [
+        source_content.get('group_by_fields'),
+        source_content.get('fields'),
+        getattr(alert, 'alert_context', None),
+    ]
+    for mapping in mappings:
+        if not isinstance(mapping, dict):
+            continue
+        for key in ('source', 'host', 'hostname', 'agent_hostname', 'computer'):
+            value = _text(mapping.get(key))
+            if value:
+                return value
+    return _text(source_content.get('source'))
 
 
 def _homewiki_url(alert: Any) -> Optional[str]:
@@ -307,12 +393,14 @@ def _notification_content(notification: Any) -> dict[str, Any]:
     homewiki_url = None
     if alert is not None:
         title = _text(alert.alert_title, notification.body or notification.title)
-        description = _clip(alert.alert_description, 6000) if alert.alert_description else ''
+        description = _clip(_description_text(alert.alert_description, title), 6000)
         candidates = [
+            ('Хост', _alert_host(alert)),
             ('Критичность', severity['label']),
             ('Статус', _status(_object_name(alert.status, ('status_name',)))),
             ('Источник', _text(alert.alert_source)),
-            ('Время события', _format_time(alert.alert_source_event_time)),
+            ('Время уведомления', _format_time(notification.created_at)),
+            ('Время исходного события', _format_time(alert.alert_source_event_time)),
             ('Зарегистрирован в IRIS', _format_time(alert.alert_creation_time)),
             ('Ответственный', _object_name(
                 alert.owner, ('name', 'user_name', 'username', 'login', 'user_login', 'email'))),

@@ -46,6 +46,7 @@ services:
     environment:
       - LOG_LEVEL
       - IRIS_PUBLIC_URL=https://iris.apps.monitoring.test
+      - IRIS_ADM_EMAIL=arsentyev_is@mail.ru
       - POSTGRES_USER
       - POSTGRES_PASSWORD
       - POSTGRES_ADMIN_USER
