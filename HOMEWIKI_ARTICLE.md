@@ -63,10 +63,10 @@ GLPI отвечает за учёт работ, IRIS — за расследов
 
 ## 4. API (для своих интеграций)
 
-Ключ: профиль (правый верхний угол) → **API Key** → Renew (после Renew старый ключ перестаёт работать!).
+Ключ: профиль (правый верхний угол) → **API Key** → Renew (после Renew старый ключ перестаёт работать!). В IRIS v3 используется endpoint `POST /api/v2/alerts`.
 
 ```bash
-curl -sk -X POST 'https://iris.apps.monitoring.test/alerts/add' \
+curl -sk -X POST 'https://iris.apps.monitoring.test/api/v2/alerts' \
   -H 'Authorization: Bearer <API_KEY>' -H 'Content-Type: application/json' \
   -d '{
     "alert_title": "Тестовый алерт",
@@ -75,51 +75,50 @@ curl -sk -X POST 'https://iris.apps.monitoring.test/alerts/add' \
     "alert_source_ref": "test-001",
     "alert_severity_id": 5,
     "alert_status_id": 2,
-    "alert_source_event_time": "2026-11-10T08:00:00",
+    "alert_source_event_time": "2026-11-11T08:00:00",
     "alert_customer_id": 1,
     "alert_source_content": {}
   }'
 ```
 
-Справочник severity: 6 Critical, 5 High, 1 Medium, 4 Low, 3 Informational. Статус 2 = New. Маппинг в TicketBridge: Graylog priority 3→High, 2→Medium, 1→Low.
+Справочник severity: 6 Critical, 5 High, 1 Medium, 4 Low, 3 Informational. Статус 2 = New. Маппинг в TicketBridge: Graylog priority 3→High, 2→Medium, 1→Low. В конфигурации TicketBridge задано `TB_IRIS_API_PATH=/api/v2/alerts`.
 
 ## 5. Администрирование (redos-server)
 
 | Что | Где |
 |---|---|
-| Код развёртывания | `~/dfir-iris/` (docker-compose.yml, .env, certificates/) |
-| Стек | iriswebapp_db (PostgreSQL), iriswebapp_app, iriswebapp_worker, iriswebapp_rabbitmq, iriswebapp_nginx — v2.4.29 |
-| Порт | 8101 (HTTPS, self-signed), снаружи — Caddy `iris.apps.monitoring.test` |
+| Код развёртывания | `~/dfir-iris-v3-test/` (docker-compose.yml, .env, certificates/) |
+| Стек | iris3test_db (PostgreSQL 18), iris3test_app, iris3test_worker, iris3test_frontend, iris3test_rabbitmq, iris3test_nginx — v3.0.0-beta.23 |
+| Порт | 8102 (HTTPS, self-signed), снаружи — Caddy `iris.apps.monitoring.test` |
 | Автозапуск | `systemctl --user status dfir-iris` |
-| Логи | `podman logs iriswebapp_app` |
-| Данные | named volumes: db_data, iris-downloads, user_templates, server_data |
+| Логи | `podman logs iris3test_app` |
+| Данные | named volumes с префиксом `dfir-iris-v3-test_` |
 
 ```bash
 # Перезапуск / остановка / поднятие
 systemctl --user restart dfir-iris     # осторожно: down+up всего стека
-podman restart iriswebapp_app          # только приложение
+podman restart iris3test_app           # только приложение
 
-# Обновление версии: правим теги в docker-compose.yml, затем
-cd ~/dfir-iris && podman-compose pull && podman-compose up -d
+# Обновление версии: сначала бэкап и проверка на копии, затем
+cd ~/dfir-iris-v3-test && podman-compose pull && podman-compose up -d
 
 # Бэкап БД
-podman exec iriswebapp_db pg_dump -U postgres iris_db > iris_db_$(date +%F).sql
+podman exec iris3test_db pg_dump -U postgres iris_db | gzip > iris_v3_$(date +%F_%H%M).sql.gz
 ```
 
-Особенности нашей установки (что чинили): SELinux — `chcon -R -t container_file_t ~/dfir-iris/certificates/`; права на ключ nginx — 644; `IRIS_WORKER` в `.env` не задавать (иначе приложение падает с «A secret key is required to use CSRF»).
+Особенности нашей установки (что чинили): SELinux — `chcon -R -t container_file_t ~/dfir-iris-v3-test/certificates/`; права на ключ nginx — 644; `IRIS_WORKER` в `.env` не задавать (иначе приложение падает с «A secret key is required to use CSRF»).
 
-## 6. Тестовый стенд IRIS v3
+## 6. Переход на IRIS v3 (11.11.2026)
 
-Основной IRIS работает на стабильной **v2.4.29**. Для предварительной проверки
-миграции развёрнут отдельный стенд **v3.0.0-beta.23**:
-**https://iris-next.apps.monitoring.test**. Вход — та же учётная запись, что и в
-основной системе: данные были восстановлены из резервной копии.
+По прежнему адресу **https://iris.apps.monitoring.test** теперь работает
+**v3.0.0-beta.23**. Адрес `iris-next.apps.monitoring.test` перенаправляет сюда же.
+Вход и API-ключ сохранились. Перенесены все **69 алертов и 1 кейс**, а также файлы
+из постоянных томов. TicketBridge уже отправляет новые алерты Graylog в v3.
 
-Стенд полностью изолирован: своя база PostgreSQL 18, контейнеры, сети и тома.
-Созданные там алерты и кейсы не попадают в основной IRIS. Для проверки интеграции
-TicketBridge использует новый endpoint `POST /api/v2/alerts`; основной поток
-Graylog пока не переключён. Стенд предназначен только для тестирования beta-версии,
-не для ведения реальных расследований.
+Старая версия v2.4.29 остановлена. Её база и финальная резервная копия сохранены
+в `~/dfir-iris-v3-test/backups/cutover-20261111-101140/`, поэтому откат возможен.
+Учитывай: v3.0.0-beta.23 — beta-релиз; перед следующими обновлениями обязательно
+снимай резервную копию и проверяй миграцию на отдельной копии.
 
 ## 7. Глоссарий: интерфейс IRIS на русском
 

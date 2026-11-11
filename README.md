@@ -14,32 +14,50 @@
 
 ![Сводка кейса расследования](docs/screenshots/case.png)
 
-## Стек
+## Текущий стек
 
-- iriswebapp_db (PostgreSQL), iriswebapp_app, iriswebapp_worker,
-  iriswebapp_rabbitmq, iriswebapp_nginx — всё **v2.4.29**;
-- `docker-compose.yml` — самодостаточный (без `extends`), работает с podman-compose;
-- порт **8101** (HTTPS, self-signed), снаружи Caddy `iris.apps.monitoring.test`;
-- автозапуск — `systemctl --user dfir-iris` (oneshot + `podman-compose up -d`).
+С **11.11.2026** основной экземпляр работает на **v3.0.0-beta.23**:
 
-## Установка
+- основной адрес: **https://iris.apps.monitoring.test**;
+- `iris-next.apps.monitoring.test` перенаправляет на основной адрес;
+- рабочий каталог на сервере: `~/dfir-iris-v3-test/`;
+- compose на сервере: `docker-compose.yml`; эталон в репозитории:
+  `docker-compose.v3.yml`;
+- контейнеры: `iris3test_db` (PostgreSQL 18), `iris3test_app`,
+  `iris3test_worker`, `iris3test_frontend`, `iris3test_rabbitmq`,
+  `iris3test_nginx`;
+- порт **8102** (HTTPS, self-signed), снаружи Caddy;
+- автозапуск: `systemctl --user dfir-iris` (enabled).
+
+Префикс `iris3test` и имя каталога оставлены после тестовой миграции: это основной
+экземпляр, а не отдельный стенд. Старый v2.4.29 остановлен, но его каталог
+`~/dfir-iris/` и named volumes сохранены для отката.
+
+## Управление
 
 ```bash
-mkdir -p ~/dfir-iris/certificates/{rootCA,web_certificates,ldap}
-cp docker-compose.yml .env.example ~/dfir-iris/
-cd ~/dfir-iris && mv .env.example .env   # заполнить секреты
+cd ~/dfir-iris-v3-test
+podman-compose ps
+podman-compose logs --tail 100 app
+systemctl --user status dfir-iris
 
-# Сертификаты
-cd certificates
-openssl req -x509 -newkey rsa:2048 -nodes \
-  -keyout web_certificates/iris_key.pem -out web_certificates/iris_cert.pem \
-  -days 825 -subj "/CN=iris.apps.monitoring.test" \
-  -addext "subjectAltName=DNS:iris.apps.monitoring.test"
-cp web_certificates/iris_cert.pem rootCA/irisRootCACert.pem
-chmod 644 web_certificates/iris_*.pem
-chcon -R -t container_file_t ~/dfir-iris/certificates/   # SELinux
+# Перезапуск всего текущего стека
+systemctl --user restart dfir-iris
 
-cd ~/dfir-iris && podman-compose up -d
+# Только приложение
+podman restart iris3test_app
+
+# Остановка без удаления томов
+systemctl --user stop dfir-iris
+```
+
+При обновлении beta-версии сначала сделать бэкап и проверить миграцию на копии.
+Затем изменить теги образов в `docker-compose.yml` и выполнить:
+
+```bash
+cd ~/dfir-iris-v3-test
+podman-compose pull
+podman-compose up -d
 ```
 
 ## Caddy
@@ -47,13 +65,25 @@ cd ~/dfir-iris && podman-compose up -d
 ```
 iris.apps.monitoring.test {
     tls internal
-    reverse_proxy https://host.containers.internal:8101 {
+    reverse_proxy https://host.containers.internal:8102 {
         transport http {
             tls
             tls_insecure_skip_verify
         }
     }
 }
+
+iris-next.apps.monitoring.test {
+    tls internal
+    redir https://iris.apps.monitoring.test{uri} permanent
+}
+```
+
+После изменения `~/n8n-docker-caddy/Caddyfile`:
+
+```bash
+podman exec caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+podman exec caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
 ```
 
 ## systemd (`~/.config/systemd/user/dfir-iris.service`)
@@ -66,7 +96,7 @@ After=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-WorkingDirectory=%h/dfir-iris
+WorkingDirectory=%h/dfir-iris-v3-test
 ExecStart=/usr/bin/podman-compose up -d
 ExecStop=/usr/bin/podman-compose down
 
@@ -74,46 +104,54 @@ ExecStop=/usr/bin/podman-compose down
 WantedBy=default.target
 ```
 
-## Первый вход и API
+## Вход и API
 
-- Пароль администратора генерируется при первом запуске: смотреть
-  `podman logs iriswebapp_app | grep -A2 "Administrator password"`.
-  Логин — `administrator`.
-- Смена пароля: профиль → Change password (политика: >12 символов, заглавная, цифра).
-- API-ключ: профиль → API Key. Приём алертов: `POST /alerts/add`,
-  заголовок `Authorization: Bearer <key>`.
-- Интеграция Graylog: TicketBridge (`TB_IRIS_URL`, `TB_IRIS_KEY`) дублирует
-  каждый High-алерт в IRIS; severity: Graylog 3→High(5), 2→Medium(1), 1→Low(4).
+- Логин администратора: `administrator`; пароль тот же, что был до миграции.
+- Смена пароля: профиль → Change password.
+- API-ключ: профиль → API Key. После Renew старый ключ перестаёт работать.
+- Приём алертов v3: `POST /api/v2/alerts`, заголовок
+  `Authorization: Bearer <key>`.
+- TicketBridge на сервере настроен с `TB_IRIS_API_PATH=/api/v2/alerts` и
+  использует основной `TB_IRIS_URL=https://iris.apps.monitoring.test`.
+- Severity: Graylog priority 3→High(5), 2→Medium(1), 1→Low(4).
 
-## Тестовая миграция v3 (11.11.2026)
+## Миграция v2 → v3 (11.11.2026)
 
-Основной экземпляр остаётся на стабильной **v2.4.29**. Изолированный стенд
-**v3.0.0-beta.23** запущен на `https://iris-next.apps.monitoring.test`
-(порт 8102, каталог `~/dfir-iris-v3-test`, compose `docker-compose.v3-test.yml`).
-Контейнеры, сети и тома имеют префикс `iris3test` / `dfir-iris-v3-test` и не
-используют данные основного экземпляра.
+Перед переключением была остановлена запись и снят финальный дамп PostgreSQL 12.
+В v3 перенесены **69 алертов и 1 кейс**, а также содержимое томов
+`iris-downloads`, `user_templates` и `server_data`. После миграции проверены:
 
-Проверено: PostgreSQL 18.6, исходные 13 алертов и 1 кейс, вход существующего
-пользователя, `pgcrypto 1.4`, создание алерта TicketBridge через
-`POST /api/v2/alerts` и его отображение в новой очереди Alerts. Резервная копия
-PG12 находится в `~/dfir-iris-v3-test/backups/`.
+- итоговая ревизия Alembic `a6d3f8b2c917`;
+- вход существующего пользователя и отображение 56 открытых алертов;
+- создание алерта через TicketBridge и `POST /api/v2/alerts` (HTTP 201),
+  затем удаление тестового алерта (HTTP 204);
+- HTTP 200 по старому основному адресу и перенаправление с `iris-next`.
 
-Особенность миграции: ревизия v2.4.29 `e5d79b8c4a55` отсутствует в графе
-v3.0.0-beta.23. На **тестовой копии** счётчик был возвращён к общему предку
-`d5a720d1b99b`, после чего штатные миграции v3 успешно применились, включая
-`c7f1e2a4d810`, которая адаптирует уже существующие таблицы дашбордов.
-Итоговая ревизия — `a6d3f8b2c917`. Не повторять это на основном экземпляре без
-нового бэкапа, остановки стека и проверки совместимости всех интеграций.
+Резервный набор переключения:
 
-```bash
-cd ~/dfir-iris-v3-test
-podman-compose -f docker-compose.yml ps
-podman-compose -f docker-compose.yml up -d
-podman-compose -f docker-compose.yml down   # без -v: сохранить тестовую БД
+```
+~/dfir-iris-v3-test/backups/cutover-20261111-101140/
 ```
 
-Для TicketBridge v3 задаётся `TB_IRIS_API_PATH=/api/v2/alerts`; основной
-TicketBridge продолжает использовать endpoint v2 `/alerts/add`.
+В нём сохранены финальный дамп `iris_pg12_final.sql.gz`, прежние Caddyfile,
+systemd units, конфигурации IRIS и TicketBridge. Особенность миграции: ревизия
+v2.4.29 `e5d79b8c4a55` отсутствует в графе v3.0.0-beta.23. На копии счётчик был
+возвращён к общему предку `d5a720d1b99b`, после чего штатные миграции v3
+применились, включая `c7f1e2a4d810` для существующих таблиц дашбордов.
+
+## Откат на v2.4.29
+
+Использовать только при необходимости: данные, созданные в v3 после
+переключения, в старой базе не появятся автоматически.
+
+1. Остановить TicketBridge и текущий IRIS:
+   `systemctl --user stop ticketbridge dfir-iris`.
+2. Восстановить `Caddyfile`, `dfir-iris.service` и `ticketbridge.env` из
+   резервного каталога переключения.
+3. Вернуть `TB_IRIS_API_PATH=/alerts/add` (или убрать параметр).
+4. Выполнить `systemctl --user daemon-reload`, запустить `dfir-iris` со старым
+   unit (каталог `~/dfir-iris`), перезагрузить Caddy и запустить TicketBridge.
+5. Проверить вход и API v2. Старые named volumes не удалялись.
 
 ## Грабли, которые уже встречались
 
@@ -124,11 +162,14 @@ TicketBridge продолжает использовать endpoint v2 `/alerts/
 4. `:ro:z` в mounts podman-compose не парсит — используем `:ro` + `chcon`.
 5. Короткие имена образов (`rabbitmq:...`) требуют полного пути `docker.io/library/...`.
 
-## Бэкап
+## Бэкап текущей базы
 
 ```bash
-podman exec iriswebapp_db pg_dump -U postgres iris_db > iris_db_$(date +%F).sql
+mkdir -p ~/dfir-iris-v3-test/backups
+podman exec iris3test_db pg_dump -U postgres iris_db | \
+  gzip > ~/dfir-iris-v3-test/backups/iris_v3_$(date +%F_%H%M).sql.gz
 ```
 
-Инструкция для пользователей — `HOMEWIKI_ARTICLE.md` (опубликована в HomeWiki,
-статья `art-iris`).
+`docker-compose.yml` в репозитории сохраняет прежнюю конфигурацию v2.4.29 только
+для отката. Инструкция для пользователей — `HOMEWIKI_ARTICLE.md` (опубликована в
+HomeWiki, статья `art-iris`).

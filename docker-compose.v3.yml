@@ -1,5 +1,5 @@
-# DFIR-IRIS v3.0.0-beta.23 — изолированный стенд миграции.
-# Не использовать для основного экземпляра: отдельные контейнеры, сети, тома и порт 8102.
+# DFIR-IRIS v3.0.0-beta.23 — основной экземпляр после миграции 11.11.2026.
+# Префикс iris3test и отдельные тома сохранены для обратимого перехода с v2; порт 8102.
 services:
   rabbitmq:
     image: docker.io/library/rabbitmq:3-management-alpine
@@ -109,7 +109,7 @@ services:
     container_name: iris3test_frontend
     restart: always
     environment:
-      - PUBLIC_EXTERNAL_API_URL=https://iris-next.apps.monitoring.test
+      - PUBLIC_EXTERNAL_API_URL=https://iris.apps.monitoring.test
       - PUBLIC_INTERNAL_API_URL=http://app:8000
       - PUBLIC_USE_MOCK_API_DATA=false
       - PROTOCOL_HEADER=x-forwarded-proto
@@ -138,7 +138,7 @@ services:
       - IRIS_FRONTEND_SERVER=frontend
       - IRIS_FRONTEND_PORT=5173
       - INTERFACE_HTTPS_PORT=443
-      - SERVER_NAME=iris-next.apps.monitoring.test
+      - SERVER_NAME=iris.apps.monitoring.test
       - CERT_FILENAME
       - KEY_FILENAME
       - IRIS_AUTHENTICATION_TYPE
