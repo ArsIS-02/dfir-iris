@@ -63,6 +63,7 @@ services:
       - ./certificates/ca-bundle/:/etc/iris-ca/:ro
       - ./custom/mail/outbound.py:/iriswebapp/app/iris_engine/mail/outbound.py:ro,z
       - ./custom/templates/email:/iriswebapp/app/templates/email:ro,z
+      - ./custom/business/alerts.py:/iriswebapp/app/business/alerts.py:ro,z
       - iris-downloads:/home/iris/downloads
       - user_templates:/home/iris/user_templates
       - server_data:/home/iris/server_data

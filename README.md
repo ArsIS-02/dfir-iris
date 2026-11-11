@@ -113,7 +113,10 @@ WantedBy=default.target
   `Authorization: Bearer <key>`.
 - TicketBridge на сервере настроен с `TB_IRIS_API_PATH=/api/v2/alerts` и
   использует основной `TB_IRIS_URL=https://iris.apps.monitoring.test`.
-- Severity: Graylog priority 3→High(5), 2→Medium(1), 1→Low(4).
+- Все активные правила Graylog привязаны к TicketBridge (255/255 на 11.11.2026):
+  High создаёт алерт IRIS и заявку GLPI, Medium/Low — только алерт IRIS.
+- Severity: Graylog priority 3→High(5), 2→Medium(1), 1→Low(4). Вручную приоритет
+  меняется в карточке **алерт → Edit → Severity → Save**.
 
 ## Whitelist и blacklist
 
@@ -147,6 +150,20 @@ OUTBOUND MAIL (SMTP)** и хранится в базе, а не в `.env`. С 11
 и `module_custom` почта оставлена выключенной, чтобы не создавать лишний шум.
 Пользовательские каналы настраиваются в **My profile → Notifications**, значения по
 умолчанию — в **Settings → Platform → Notifications**.
+
+### Письмо при самостоятельном взятии алерта в работу
+
+Штатный listener IRIS намеренно не уведомляет пользователя о его собственных
+действиях. Лабораторный overlay `custom/business/alerts.py` дополняет это поведение:
+письмо `alert_assigned` отправляется, когда владелец алерта действительно меняется
+на текущего пользователя. Последующее изменение Severity, описания или других полей
+своего алерта повторного письма не создаёт.
+
+Overlay подключён только к сервису **app** в `docker-compose.v3.yml`; worker его не
+требует. Сквозной тест подтвердил сохранение владельца, одно уведомление с заполненным
+`emailed_at` и отсутствие дубликата после смены Severity; тестовые данные удалены.
+При обновлении IRIS файл нужно сверить с новым `app/business/alerts.py`: это overlay
+полного исходника v3.0.0-beta.23, а не самостоятельный плагин.
 
 ### Фирменный HTML-шаблон IRIS Homelab
 
