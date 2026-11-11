@@ -86,6 +86,19 @@ podman exec caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfi
 podman exec caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
 ```
 
+Адрес `iris.apps.monitoring.test` должен быть объявлен **только один раз**. До
+исправления 11.11.2026 старый upstream `8101` оставался также в
+`caddy_config/Caddyfile.apps`, из-за чего `caddy reload` возвращал `ambiguous
+site definition`. Устаревший блок удалён, актуальный upstream `8102` сохранён;
+validate и reload прошли успешно. Резервные файлы имеют суффикс
+`.bak-iris-dedup-20261111T133007Z`.
+
+Для плитки Atrium в `~/homelab-services/services.yaml` заданы
+`backend: host.containers.internal:8102`, `scheme: https` и `insecure: true`.
+Последнее нужно прямому health-check из контейнера Atrium: без него проверка
+самоподписанного сертификата возвращала `code=0 / bad`, а с ним — `200 / ok`.
+Копия конфигурации: `services.yaml.bak-iris-8102-20261111T133237Z`.
+
 ## systemd (`~/.config/systemd/user/dfir-iris.service`)
 
 ```
@@ -164,15 +177,19 @@ OUTBOUND MAIL (SMTP)** и хранится в базе, а не в `.env`. С 11
 в Git или `.env`. Штатный **Send test** и реальные фирменные уведомления успешно
 переданы SMTP; получение и корректное отображение письма с IOC подтверждены пользователем.
 
-С 11.11.2026 **IRIS — основной отправитель мгновенных писем о новых алертах**.
+С 11.11.2026 мгновенные письма о новых алертах отправляют **и Graylog, и IRIS** —
+так выбрано владельцем лаборатории. Об одном событии могут прийти два письма.
 Лабораторный overlay добавляет событие `alert_created`: для нового неназначенного
 алерта письмо получает API caller, создавший алерт; в интеграции TicketBridge это
 administrator (`user_id=1`). Если алерт создан уже назначенным, используется штатное
-`alert_assigned`, поэтому два письма не отправляются. Мгновенные email-привязки
-Graylog отключены у **252 активных правил**, уже подключённых к TicketBridge;
-все **255/255** webhook-привязок TicketBridge сохранены. Дайджесты
-**Mail.ru Alert Daily Digest** и **Mail.ru Daily Digest** не изменялись: их привязки
-у трёх правил совпали до и после операции.
+`alert_assigned`, поэтому IRIS не отправляет второе письмо о создании. Мгновенные
+email-привязки Graylog восстановлены у **252 активных правил**, уже подключённых
+к TicketBridge; все **255/255** webhook-привязок TicketBridge сохранены. Дайджесты
+**Mail.ru Alert Daily Digest** и **Mail.ru Daily Digest** не изменялись. Привязки
+проверены через API Graylog; доставка конкретного нового письма в ящик этой
+проверкой не подтверждается. Для обратного переключения на схему «только IRIS»
+и последующего восстановления используются скрипты TicketBridge
+`tools/sync_graylog_mail.py` и `tools/restore_graylog_mail.py`.
 
 IRIS также отправляет письма о назначении/эскалации алертов, задачах, изменениях
 кейсов, упоминаниях и War Rooms. Администратору задан рабочий email, включён канал

@@ -110,9 +110,9 @@ IRIS v3 поддерживает два канала уведомлений: в�
 
 Адрес администратора заменён с `administrator@localhost` на рабочий ящик. В **My profile → Notifications** для него включена почта об упоминаниях, назначении задач и кейсов, изменении состояния кейса, назначении и эскалации алертов, сообщениях и ответах War Rooms. AI-предложения и пользовательские события модулей по почте отключены. Общие значения по умолчанию находятся в **Settings → Platform → Notifications**. Адрес дополнительно задан параметром `IRIS_ADM_EMAIL` в `docker-compose.v3.yml`: без него штатный `post_init` возвращает `administrator@localhost` после каждого перезапуска.
 
-**IRIS — основной отправитель мгновенных писем о новых алертах.** Лабораторный overlay `custom/business/alerts.py` добавляет событие `alert_created`: письмо о новом неназначенном алерте получает API caller, через которого создан алерт. В интеграции TicketBridge это administrator. Если алерт создан уже назначенным, отправляется только штатное `alert_assigned`, без дубликата.
+**Мгновенные письма о новых алертах отправляют и Graylog, и IRIS** — так выбрано владельцем лаборатории, поэтому об одном событии могут прийти два письма. Лабораторный overlay `custom/business/alerts.py` добавляет событие `alert_created`: письмо о новом неназначенном алерте получает API caller, через которого создан алерт. В интеграции TicketBridge это administrator. Если алерт создан уже назначенным, IRIS отправляет только штатное `alert_assigned`, без второго письма о создании.
 
-Чтобы одно событие не приходило дважды, мгновенные email-привязки Graylog отключены у **252 активных правил**, уже подключённых к TicketBridge. Все **255/255** webhook-привязок TicketBridge сохранены. Ежедневные дайджесты **Mail.ru Alert Daily Digest** и **Mail.ru Daily Digest** продолжают работать: их привязки у трёх правил не менялись.
+Мгновенные email-привязки Graylog восстановлены у **252 активных правил**, уже подключённых к TicketBridge. Все **255/255** webhook-привязок TicketBridge сохранены. Ежедневные дайджесты **Mail.ru Alert Daily Digest** и **Mail.ru Daily Digest** продолжают работать и не менялись. Привязки проверены через API Graylog; фактическую доставку нового письма эта проверка не заменяет. Обратное переключение на схему «только IRIS» и восстановление привязок описаны в README TicketBridge.
 
 IRIS также отправляет письма о назначении/эскалации алертов, задачах, кейсах, упоминаниях и War Rooms. Штатный IRIS не уведомляет пользователя о его собственном назначении, поэтому overlay дополнительно отправляет `alert_assigned` при фактической смене владельца на текущего пользователя, включая самостоятельное взятие неназначенного алерта в работу. Изменение Severity или описания уже своего алерта нового письма о назначении не создаёт.
 
@@ -151,6 +151,7 @@ HTML-описание TicketBridge преобразуется в чистый с
 | Код развёртывания | `~/dfir-iris-v3-test/` (docker-compose.yml, .env, certificates/) |
 | Стек | iris3test_db (PostgreSQL 18), iris3test_app, iris3test_worker, iris3test_frontend, iris3test_rabbitmq, iris3test_nginx — v3.0.0-beta.23 |
 | Порт | 8102 (HTTPS, self-signed), снаружи — Caddy `iris.apps.monitoring.test` |
+| Плитка Atrium | `backend: host.containers.internal:8102`, `scheme: https`, `insecure: true`; проверка возвращает 200 / ok |
 | Автозапуск | `systemctl --user status dfir-iris` |
 | Логи | `podman logs iris3test_app` |
 | Данные | named volumes с префиксом `dfir-iris-v3-test_` |
