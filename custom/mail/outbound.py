@@ -39,6 +39,7 @@ _EVENT_LABELS = {
     'task_assigned': 'Вам назначена задача',
     'case_state_change': 'Изменилось состояние кейса',
     'case_assigned': 'Вам назначен кейс',
+    'alert_created': 'Новый алерт',
     'alert_assigned': 'Вам назначен алерт',
     'alert_escalated': 'Алерт эскалирован',
     'war_room_message': 'Новое сообщение в War Room',

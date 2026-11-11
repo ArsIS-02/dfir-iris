@@ -119,6 +119,14 @@ class NotificationMailTest(unittest.TestCase):
         self.assertIsNone(self.mail._safe_url('//evil.example/path', 'https://iris.example', True))
         self.assertIsNone(self.mail._safe_url('https://user:secret@example.com'))
 
+    def test_alert_created_label(self):
+        self.mail._load_alert = lambda notification: self._alert()
+        notification = self._notification()
+        notification.event_type = 'alert_created'
+        notification.title = 'A new alert was received'
+        content = self.mail._notification_content(notification)
+        self.assertEqual(content['event_label'], 'Новый алерт')
+
     def test_alert_content_and_html(self):
         self.mail._load_alert = lambda notification: self._alert()
         content = self.mail._notification_content(self._notification())
