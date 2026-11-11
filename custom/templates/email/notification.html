@@ -28,6 +28,20 @@
               </div>
               {% endif %}
 
+              {% if iocs %}
+              <div style="background:#181825;border:1px solid #fab387;border-radius:7px;padding:13px 15px;margin:0 0 20px;">
+                <div style="color:#fab387;font-size:11px;font-weight:bold;letter-spacing:.5px;margin:0 0 8px;">ИНДИКАТОРЫ КОМПРОМЕТАЦИИ (IOC)</div>
+                <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;table-layout:fixed;font-size:13px;line-height:1.5;">
+                  {% for ioc in iocs %}
+                  <tr>
+                    <td valign="top" width="100" style="width:100px;padding:5px 12px 5px 0;color:#a6adc8;text-transform:uppercase;overflow-wrap:anywhere;">{{ ioc.type }}</td>
+                    <td valign="top" style="padding:5px 0;color:#f9e2af;font-family:Menlo,Consolas,'Courier New',monospace;font-weight:bold;overflow-wrap:anywhere;word-break:break-word;">{{ ioc.value }}</td>
+                  </tr>
+                  {% endfor %}
+                </table>
+              </div>
+              {% endif %}
+
               <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;table-layout:fixed;font-size:14px;line-height:1.45;">
                 {% for field in fields %}
                 <tr>
@@ -51,11 +65,12 @@
               </table>
               {% endif %}
 
-              {% if iris_url or source_url or homewiki_url %}
+              {% if iris_url or source_url or homewiki_url or action_links %}
               <div style="margin-top:25px;line-height:2.9;">
                 {% if iris_url %}<span style="display:inline-block;margin:0 10px 10px 0;"><a href="{{ iris_url }}" style="background:#89b4fa;color:#11111b;padding:10px 17px;border-radius:6px;text-decoration:none;font-weight:bold;font-size:14px;line-height:1.4;display:inline-block;">Открыть в IRIS</a></span>{% endif %}
                 {% if source_url %}<span style="display:inline-block;margin:0 10px 10px 0;"><a href="{{ source_url }}" style="background:#a6e3a1;color:#11111b;padding:10px 17px;border-radius:6px;text-decoration:none;font-weight:bold;font-size:14px;line-height:1.4;display:inline-block;">Источник в Graylog</a></span>{% endif %}
                 {% if homewiki_url %}<span style="display:inline-block;margin:0 10px 10px 0;"><a href="{{ homewiki_url }}" style="background:#f9e2af;color:#11111b;padding:10px 17px;border-radius:6px;text-decoration:none;font-weight:bold;font-size:14px;line-height:1.4;display:inline-block;">Разбор в HomeWiki</a></span>{% endif %}
+                {% for action in action_links %}<span style="display:inline-block;margin:0 10px 10px 0;"><a href="{{ action.url }}" style="background:{% if action.kind == 'block' %}#f38ba8{% else %}#94e2d5{% endif %};color:#11111b;padding:10px 17px;border-radius:6px;text-decoration:none;font-weight:bold;font-size:14px;line-height:1.4;display:inline-block;max-width:100%;overflow-wrap:anywhere;">{{ action.label }}</a></span>{% endfor %}
               </div>
               {% endif %}
 

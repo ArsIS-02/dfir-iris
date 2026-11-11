@@ -22,6 +22,7 @@ from email.message import EmailMessage
 from typing import Any
 from typing import Optional
 from typing import Sequence
+from urllib.parse import urlencode
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -341,6 +342,89 @@ def _homewiki_url(alert: Any) -> Optional[str]:
     return f'https://homewiki.apps.monitoring.test/rules/{reference}'
 
 
+def _alert_iocs(alert: Any) -> list[dict[str, str]]:
+    """Collect IOCs from Graylog fields and IRIS' own alert relation."""
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(value: Any, kind: Any = '') -> None:
+        if isinstance(value, dict):
+            kind = value.get('ioc_type') or value.get('type') or kind
+            value = value.get('ioc_value') or value.get('value') or value.get('indicator')
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                add(item, kind)
+            return
+        value_text = _text(value)
+        if not value_text or len(value_text) > 2048 or len(result) >= 50:
+            return
+        if kind is not None and not isinstance(kind, (str, int, float)):
+            kind = _object_name(kind, ('type_name', 'name'))
+        kind_text = _text(kind, 'indicator').lower()
+        key = (kind_text, value_text.casefold())
+        if key in seen:
+            return
+        seen.add(key)
+        result.append({'type': kind_text, 'value': value_text})
+
+    source_content = getattr(alert, 'alert_source_content', None) or {}
+    mappings = [
+        source_content.get('fields') if isinstance(source_content, dict) else None,
+        source_content.get('group_by_fields') if isinstance(source_content, dict) else None,
+        getattr(alert, 'alert_context', None),
+    ]
+    for mapping in mappings:
+        if not isinstance(mapping, dict):
+            continue
+        add(mapping.get('ioc'), mapping.get('ioc_type'))
+        related = mapping.get('iocs') or []
+        if isinstance(related, dict):
+            related = [related]
+        for item in related:
+            add(item, mapping.get('ioc_type'))
+
+    try:
+        related_iocs = list(getattr(alert, 'iocs', None) or [])
+    except Exception:
+        # An unavailable ORM relation must not suppress the notification.
+        related_iocs = []
+    for ioc in related_iocs:
+        value = _object_name(ioc, ('ioc_value', 'value', 'indicator'))
+        kind_object = getattr(ioc, 'ioc_type', None)
+        kind = _object_name(kind_object, ('type_name', 'name')) or kind_object
+        add(value, kind)
+    return result
+
+
+def _action_links(alert: Any, iocs: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Restore TicketBridge actions as first-class, safe email buttons."""
+    actions: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add(label: str, url: Any, kind: str) -> None:
+        safe_url = _safe_url(url)
+        if not safe_url or safe_url in seen:
+            return
+        seen.add(safe_url)
+        actions.append({'label': label, 'url': safe_url, 'kind': kind})
+
+    for ioc in iocs:
+        if ioc['type'] not in ('ip', 'domain'):
+            continue
+        query = urlencode({'block': ioc['value'], 'reason': 'Graylog'})
+        add(
+            f"Заблокировать {ioc['value']}",
+            f'https://blockboard.apps.monitoring.test/?{query}',
+            'block',
+        )
+
+    source_content = getattr(alert, 'alert_source_content', None) or {}
+    fields = source_content.get('fields') if isinstance(source_content, dict) else None
+    if isinstance(fields, dict):
+        add('Отчёт TrafficLens', fields.get('tl_report'), 'trafficlens')
+    return actions
+
+
 def _technical_fields(alert: Any) -> list[dict[str, Any]]:
     fields: list[dict[str, Any]] = []
     source_content = getattr(alert, 'alert_source_content', None) or {}
@@ -389,11 +473,15 @@ def _notification_content(notification: Any) -> dict[str, Any]:
 
     fields: list[dict[str, Any]] = []
     technical_fields: list[dict[str, Any]] = []
+    iocs: list[dict[str, str]] = []
+    action_links: list[dict[str, str]] = []
     source_url = None
     homewiki_url = None
     if alert is not None:
         title = _text(alert.alert_title, notification.body or notification.title)
         description = _clip(_description_text(alert.alert_description, title), 6000)
+        iocs = _alert_iocs(alert)
+        action_links = _action_links(alert, iocs)
         candidates = [
             ('Хост', _alert_host(alert)),
             ('Критичность', severity['label']),
@@ -437,6 +525,8 @@ def _notification_content(notification: Any) -> dict[str, Any]:
         'severity': severity,
         'fields': fields,
         'technical_fields': technical_fields,
+        'iocs': iocs,
+        'action_links': action_links,
         'iris_url': iris_url,
         'source_url': source_url,
         'homewiki_url': homewiki_url,
@@ -454,6 +544,11 @@ def _plain_text(content: dict[str, Any]) -> str:
     ]
     if content['description']:
         lines.extend([content['description'], ''])
+    if content['iocs']:
+        lines.append('--- Индикаторы компрометации (IOC) ---')
+        for ioc in content['iocs']:
+            lines.append(f"{ioc['type']}: {ioc['value']}")
+        lines.append('')
     for field in content['fields']:
         lines.append(f"{field['label']}: {field['value']}")
     if content['technical_fields']:
@@ -467,6 +562,8 @@ def _plain_text(content: dict[str, Any]) -> str:
         lines.append(f"Источник в Graylog: {content['source_url']}")
     if content['homewiki_url']:
         lines.append(f"Разбор в HomeWiki: {content['homewiki_url']}")
+    for action in content['action_links']:
+        lines.append(f"{action['label']}: {action['url']}")
     lines.extend([
         '',
         f"Уведомление № {content['notification_id']} · {content['notification_time']}",

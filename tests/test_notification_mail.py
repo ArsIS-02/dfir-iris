@@ -160,6 +160,58 @@ class NotificationMailTest(unittest.TestCase):
         self.assertIn('Статус: Новый', plain)
         self.assertIn('Открыть в IRIS:', plain)
 
+    def test_iocs_and_action_links(self):
+        alert = self._alert()
+        alert.alert_source_content['fields'].update({
+            'ioc': '8.8.8.8',
+            'ioc_type': 'ip',
+            'tl_report': 'https://trafficlens.apps.monitoring.test/jobs/demo',
+        })
+        alert.iocs = [
+            SimpleNamespace(
+                ioc_value='evil.example',
+                ioc_type=SimpleNamespace(type_name='domain'),
+            ),
+            SimpleNamespace(
+                ioc_value='44d88612fea8a8f36de82e1278abb02f',
+                ioc_type=SimpleNamespace(type_name='md5'),
+            ),
+            SimpleNamespace(
+                ioc_value='8.8.8.8',
+                ioc_type=SimpleNamespace(type_name='ip'),
+            ),
+        ]
+        self.mail._load_alert = lambda notification: alert
+        content = self.mail._notification_content(self._notification())
+
+        self.assertEqual(content['iocs'], [
+            {'type': 'ip', 'value': '8.8.8.8'},
+            {'type': 'domain', 'value': 'evil.example'},
+            {'type': 'md5', 'value': '44d88612fea8a8f36de82e1278abb02f'},
+        ])
+        self.assertEqual([action['kind'] for action in content['action_links']],
+                         ['block', 'block', 'trafficlens'])
+        self.assertEqual(
+            content['action_links'][0]['url'],
+            'https://blockboard.apps.monitoring.test/?block=8.8.8.8&reason=Graylog')
+        self.assertEqual(
+            content['action_links'][2]['url'],
+            'https://trafficlens.apps.monitoring.test/jobs/demo')
+
+        html = self.mail.app.jinja_env.get_template('email/notification.html').render(**content)
+        self.assertIn('ИНДИКАТОРЫ КОМПРОМЕТАЦИИ (IOC)', html)
+        self.assertIn('Заблокировать 8.8.8.8', html)
+        self.assertIn('Заблокировать evil.example', html)
+        self.assertNotIn('Заблокировать 44d88612', html)
+        self.assertIn('Отчёт TrafficLens', html)
+        self.assertIn('block=8.8.8.8&amp;reason=Graylog', html)
+
+        plain = self.mail._plain_text(content)
+        self.assertIn('ip: 8.8.8.8', plain)
+        self.assertIn('md5: 44d88612fea8a8f36de82e1278abb02f', plain)
+        self.assertIn('Заблокировать evil.example: https://blockboard.', plain)
+        self.assertIn('Отчёт TrafficLens: https://trafficlens.', plain)
+
     def test_generic_notification_without_source_object(self):
         notification = self._notification()
         notification.source_type = 'case'
