@@ -45,6 +45,7 @@ services:
       - .env
     environment:
       - LOG_LEVEL
+      - IRIS_PUBLIC_URL=https://iris.apps.monitoring.test
       - POSTGRES_USER
       - POSTGRES_PASSWORD
       - POSTGRES_ADMIN_USER
@@ -59,6 +60,8 @@ services:
       - ./certificates/:/home/iris/certificates/:ro
       - ./certificates/ldap/:/iriswebapp/certificates/ldap/:ro
       - ./certificates/ca-bundle/:/etc/iris-ca/:ro
+      - ./custom/mail/outbound.py:/iriswebapp/app/iris_engine/mail/outbound.py:ro,z
+      - ./custom/templates/email:/iriswebapp/app/templates/email:ro,z
       - iris-downloads:/home/iris/downloads
       - user_templates:/home/iris/user_templates
       - server_data:/home/iris/server_data
@@ -92,12 +95,15 @@ services:
       - IRIS_SECURITY_PASSWORD_SALT
       - IRIS_WORKER
       - LOG_LEVEL
+      - IRIS_PUBLIC_URL=https://iris.apps.monitoring.test
       - REQUESTS_CA_BUNDLE
       - SSL_CERT_FILE
     volumes:
       - ./certificates/:/home/iris/certificates/:ro
       - ./certificates/ldap/:/iriswebapp/certificates/ldap/:ro
       - ./certificates/ca-bundle/:/etc/iris-ca/:ro
+      - ./custom/mail/outbound.py:/iriswebapp/app/iris_engine/mail/outbound.py:ro,z
+      - ./custom/templates/email:/iriswebapp/app/templates/email:ro,z
       - iris-downloads:/home/iris/downloads
       - user_templates:/home/iris/user_templates
       - server_data:/home/iris/server_data
