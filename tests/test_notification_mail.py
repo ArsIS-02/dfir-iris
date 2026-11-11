@@ -96,7 +96,10 @@ class NotificationMailTest(unittest.TestCase):
                 'id': 'EVENT',
                 'event_definition_id': '6af0c56861b983feab6a56cc',
                 'message': 'Событие <script>alert(1)</script>',
-                'fields': {'source': 'redos-server'},
+                'fields': {
+                    'source': 'redos-server',
+                    'access_token': 'не должно попасть в письмо',
+                },
             },
         )
 

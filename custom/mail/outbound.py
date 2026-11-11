@@ -144,13 +144,26 @@ def send_email(to: Sequence[str],
     return True
 
 
+def _without_sensitive(value: Any) -> Any:
+    """Recursively remove secret-looking keys before JSON reaches an email."""
+    if isinstance(value, dict):
+        return {
+            key: _without_sensitive(item)
+            for key, item in value.items()
+            if not _SENSITIVE_KEY.search(str(key))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_without_sensitive(item) for item in value]
+    return value
+
+
 def _text(value: Any, default: str = '') -> str:
     if value is None:
         return default
     if isinstance(value, bool):
         return 'да' if value else 'нет'
     if isinstance(value, (dict, list, tuple)):
-        value = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+        value = json.dumps(_without_sensitive(value), ensure_ascii=False, indent=2, default=str)
     result = str(value).strip()
     return result or default
 
