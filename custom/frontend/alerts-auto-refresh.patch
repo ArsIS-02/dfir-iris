@@ -1,0 +1,143 @@
+diff --git a/src/routes/(app)/alerts/+page.svelte b/src/routes/(app)/alerts/+page.svelte
+index fc9a768..1272eef 100644
+--- a/src/routes/(app)/alerts/+page.svelte
++++ b/src/routes/(app)/alerts/+page.svelte
+@@ -122,6 +122,11 @@
+ 		toggleAlertSort,
+ 		type AlertSortColumn
+ 	} from './helpers/alert-queue-columns';
++	import {
++		ALERTS_AUTO_REFRESH_MS,
++		isAlertEditingTarget,
++		shouldAutoRefreshAlerts
++	} from './helpers/alerts-auto-refresh';
+ 
+ 	type QueryState = {
+ 		page: number;
+@@ -687,6 +692,34 @@
+ 		void refreshAlerts();
+ 	};
+ 
++	const autoRefreshAlerts = () => {
++		const dialogOpen =
++			filtersOpen ||
++			reassignOpen ||
++			showConfirmDelete ||
++			showConfirmDeletePreset ||
++			showAlertHistory ||
++			showAlertEdit ||
++			showAlertCreate ||
++			showMerge ||
++			showClose;
++
++		if (
++			!shouldAutoRefreshAlerts({
++				hidden: document.hidden,
++				busy: status !== 'ready' || creatingAlert,
++				dialogOpen,
++				editing: isAlertEditingTarget(document.activeElement)
++			})
++		) {
++			return;
++		}
++
++		// Reuse the normal queue loader: URL filters, page size, view and scroll
++		// stay in place, and the loading flag prevents overlapping list requests.
++		refreshCurrentView();
++	};
++
+ 	/**
+ 	 * Remember the layout part of `next` in the user's profile.
+ 	 *
+@@ -1278,6 +1311,20 @@
+ 
+ 		await alerts.loadSavedFilters();
+ 	});
++
++	onMount(() => {
++		const timer = window.setInterval(autoRefreshAlerts, ALERTS_AUTO_REFRESH_MS);
++		const refreshWhenVisible = () => {
++			if (!document.hidden) autoRefreshAlerts();
++		};
++
++		document.addEventListener('visibilitychange', refreshWhenVisible);
++
++		return () => {
++			window.clearInterval(timer);
++			document.removeEventListener('visibilitychange', refreshWhenVisible);
++		};
++	});
+ </script>
+ 
+ <svelte:head>
+diff --git a/src/routes/(app)/alerts/helpers/__tests__/alerts-auto-refresh.test.ts b/src/routes/(app)/alerts/helpers/__tests__/alerts-auto-refresh.test.ts
+new file mode 100644
+index 0000000..cf9166d
+--- /dev/null
++++ b/src/routes/(app)/alerts/helpers/__tests__/alerts-auto-refresh.test.ts
+@@ -0,0 +1,38 @@
++import { describe, expect, it } from 'vitest';
++import {
++	ALERTS_AUTO_REFRESH_MS,
++	isAlertEditingTarget,
++	shouldAutoRefreshAlerts
++} from '../alerts-auto-refresh';
++
++describe('shouldAutoRefreshAlerts', () => {
++	const ready = { hidden: false, busy: false, dialogOpen: false, editing: false };
++
++	it('runs every 30 seconds when the queue is idle and visible', () => {
++		expect(ALERTS_AUTO_REFRESH_MS).toBe(30_000);
++		expect(shouldAutoRefreshAlerts(ready)).toBe(true);
++	});
++
++	it.each([
++		['hidden tab', { hidden: true }],
++		['request in flight', { busy: true }],
++		['open dialog', { dialogOpen: true }],
++		['active editor', { editing: true }]
++	])('pauses for a %s', (_name, override) => {
++		expect(shouldAutoRefreshAlerts({ ...ready, ...override })).toBe(false);
++	});
++});
++
++describe('isAlertEditingTarget', () => {
++	it.each(['input', 'textarea', 'select'])('recognises an active %s', (tag) => {
++		expect(isAlertEditingTarget(document.createElement(tag))).toBe(true);
++	});
++
++	it('recognises rich-text editors but not buttons or no selection', () => {
++		const editor = document.createElement('div');
++		editor.setAttribute('contenteditable', 'true');
++		expect(isAlertEditingTarget(editor)).toBe(true);
++		expect(isAlertEditingTarget(document.createElement('button'))).toBe(false);
++		expect(isAlertEditingTarget(null)).toBe(false);
++	});
++});
+diff --git a/src/routes/(app)/alerts/helpers/alerts-auto-refresh.ts b/src/routes/(app)/alerts/helpers/alerts-auto-refresh.ts
+new file mode 100644
+index 0000000..7057f66
+--- /dev/null
++++ b/src/routes/(app)/alerts/helpers/alerts-auto-refresh.ts
+@@ -0,0 +1,21 @@
++export const ALERTS_AUTO_REFRESH_MS = 30_000;
++
++type AlertsAutoRefreshState = {
++	hidden: boolean;
++	busy: boolean;
++	dialogOpen: boolean;
++	editing: boolean;
++};
++
++/** Refresh only when it cannot interrupt the analyst or duplicate a request. */
++export const shouldAutoRefreshAlerts = ({
++	hidden,
++	busy,
++	dialogOpen,
++	editing
++}: AlertsAutoRefreshState): boolean => !hidden && !busy && !dialogOpen && !editing;
++
++/** Inputs and rich-text editors keep their unsent content across queue updates. */
++export const isAlertEditingTarget = (target: Element | null): boolean =>
++	target?.matches('input, textarea, select, [contenteditable]:not([contenteditable="false"])') ??
++	false;

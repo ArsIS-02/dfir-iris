@@ -62,8 +62,8 @@ services:
       - ./certificates/ldap/:/iriswebapp/certificates/ldap/:ro
       - ./certificates/ca-bundle/:/etc/iris-ca/:ro
       - ./custom/mail/outbound.py:/iriswebapp/app/iris_engine/mail/outbound.py:ro,z
-      - ./custom/templates/email:/iriswebapp/app/templates/email:ro,z
       - ./custom/business/alerts.py:/iriswebapp/app/business/alerts.py:ro,z
+      - ./custom/templates/email:/iriswebapp/app/templates/email:ro,z
       - iris-downloads:/home/iris/downloads
       - user_templates:/home/iris/user_templates
       - server_data:/home/iris/server_data
@@ -113,7 +113,9 @@ services:
       - iris_backend
 
   frontend:
-    image: ghcr.io/dfir-iris/iris-frontend:v3.0.0-beta.23
+    # Точный upstream beta.23 + custom/frontend/alerts-auto-refresh.patch.
+    # Пересборка: custom/frontend/build.sh.
+    image: localhost/iris-frontend-homelab:v3.0.0-beta.23-auto-refresh
     container_name: iris3test_frontend
     restart: always
     environment:

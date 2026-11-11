@@ -118,6 +118,29 @@ WantedBy=default.target
 - Severity: Graylog priority 3→High(5), 2→Medium(1), 1→Low(4). Вручную приоритет
   меняется в карточке **алерт → Edit → Severity → Save**.
 
+## Фоновое обновление очереди алертов
+
+Frontend собирается из точной upstream-ревизии `3e02ba0d221235968b188c440faaeac4169f0714`
+(**v3.0.0-beta.23**) с патчем `custom/frontend/alerts-auto-refresh.patch`. Очередь
+обновляется каждые **30 секунд без перезагрузки страницы** через штатный загрузчик:
+текущие фильтры, страница, режим List/Split/Board и прокрутка сохраняются. Обновление
+не запускается, когда вкладка скрыта, идёт другой запрос, открыт диалог/панель фильтров
+или фокус находится в поле ввода. При возвращении на вкладку выполняется проверка сразу.
+
+Образ: `localhost/iris-frontend-homelab:v3.0.0-beta.23-auto-refresh`.
+Пересборка на сервере:
+
+```bash
+cd ~/dfir-iris-v3-test
+bash custom/frontend/build.sh
+podman-compose up -d frontend
+```
+
+Проверки upstream с патчем: **3172 теста в 238 файлах**, `npm run check` — 0 ошибок
+(8 исходных предупреждений в других компонентах), production `npm run build` успешна.
+При обновлении IRIS нужно сменить закреплённую ревизию в `custom/frontend/build.sh`,
+проверить применимость патча и повторить тесты, а не переносить его вслепую.
+
 ## Whitelist и blacklist
 
 В исходниках установленной **v3.0.0-beta.23** нет общего IOC-whitelist/blacklist,
