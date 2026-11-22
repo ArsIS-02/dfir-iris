@@ -154,6 +154,37 @@ podman-compose up -d frontend
 При обновлении IRIS нужно сменить закреплённую ревизию в `custom/frontend/build.sh`,
 проверить применимость патча и повторить тесты, а не переносить его вслепую.
 
+## Velociraptor: сбор из модального окна кейса
+
+Патч `custom/frontend/case-velociraptor.patch` добавляет **Case menu → Workflow →
+Collect with Velociraptor**. Команда открывает диалог внутри IRIS, а не отдельную вкладку.
+Оператор выбирает актив кейса, видит Client ID из `custom_attributes.velociraptor.client_id`,
+может исправить его и отдельной кнопкой **Save to asset** сохранить через штатный API IRIS.
+Сохранение не запускает сбор. Для запуска нужно явное подтверждение; TicketBridge разрешает
+только `Generic.Client.Info`, а `asset_id` включается в метаданные Evidence ZIP.
+
+**Обязательное условие:** в **Settings → Custom Attributes → Assets** должна быть объявлена
+вкладка `velociraptor` с полем `client_id` типа `input_string` (`value: ""`, `mandatory: false`).
+Иначе IRIS возвращает HTTP 200 на обновление актива, но отбрасывает неизвестное поле. Схему нужно
+сохранять обычным additive-режимом **Save**, не Partial/Complete overwrite. После настройки следует
+повторно прочитать актив и убедиться, что Client ID сохранился и автозаполняется в диалоге.
+
+Сборка требует `TB_KEY` и `TB_TICKETBRIDGE_URL`; секрет и реальный origin подставляются
+только в локальный build context и не хранятся в патче. Например:
+`TB_KEY='<secret>' TB_TICKETBRIDGE_URL='https://ticketbridge.example.test' bash custom/frontend/build.sh`.
+Полный набор: **3168 тестов в 238 файлах**, включая 5 новых unit-тестов;
+`npm run check` — 0 ошибок (8 прежних предупреждений), production `npm run build` успешна.
+Патч проверен командой `git apply --check --cached` относительно закреплённого upstream.
+
+Для запроса из браузера origin TicketBridge должен быть явно добавлен в `connect-src` политики
+CSP nginx. Пример находится в `custom/nginx.conf`: перед сборкой замените
+`https://ticketbridge.example.test` на свой origin, а `iris.example.test` — на свой `server_name`.
+`custom/Containerfile.nginx` собирает образ
+с этой конфигурацией. Нельзя использовать `*` вместо конкретного origin. После изменения нужно
+проверить ответный заголовок и preflight `OPTIONS`. Иначе браузер покажет `Failed to fetch` ещё
+до отправки POST, не создав Flow. Интеграционная проверка подтвердила загрузку Evidence ZIP,
+корректные `case_id` и `asset_id`, состояние Flow `FINISHED` и контрольные суммы manifest.
+
 ## Whitelist и blacklist
 
 В исходниках установленной **v3.0.0-beta.23** нет общего IOC-whitelist/blacklist,

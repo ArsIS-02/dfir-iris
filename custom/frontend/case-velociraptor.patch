@@ -1,0 +1,557 @@
+diff --git a/src/routes/(app)/case/[case_id]/+layout.svelte b/src/routes/(app)/case/[case_id]/+layout.svelte
+index f232f20..b89bf0b 100644
+--- a/src/routes/(app)/case/[case_id]/+layout.svelte
++++ b/src/routes/(app)/case/[case_id]/+layout.svelte
+@@ -90,6 +90,7 @@
+ 	import EvidenceAddDialog from './evidence/components/evidence-add-dialog.svelte';
+ 	import DatastoreAddFileDialog from '$lib/components/common/Datastore/DatastoreAddFileDialog.svelte';
+ 	import DatastoreAddFolderDialog from '$lib/components/common/Datastore/DatastoreAddFolderDialog.svelte';
++	import VelociraptorCollectDialog from './components/VelociraptorCollectDialog.svelte';
+ 
+ 	let { children }: { children: Snippet } = $props();
+ 
+@@ -144,6 +145,7 @@
+ 	let hookOptions = $state<HookOption[]>([]);
+ 	let showRequestReview = $state(false);
+ 	let showReport = $state(false);
++	let showVelociraptor = $state(false);
+ 	let reportType = $state<CaseReportType>('Investigation');
+ 
+ 	function openReport(type: CaseReportType) {
+@@ -151,6 +153,11 @@
+ 		showReport = true;
+ 	}
+ 
++	const openVelociraptorCollection = () => {
++		if (!cases.currentCaseId()) return;
++		showVelociraptor = true;
++	};
++
+ 	const refresh = async () => {
+ 		const id = cases.currentCaseId();
+ 		await cases.load({ case_ids: [id] });
+@@ -381,6 +388,12 @@
+ 		<DropdownMenuItem>
+ 			<HardDriveUploadIcon class="mr-2 size-4" /> Pipelines
+ 		</DropdownMenuItem>
++		<DropdownMenuItem
++			onclick={openVelociraptorCollection}
++			data-testid="case-menu-velociraptor-collect"
++		>
++			<HardDriveUploadIcon class="mr-2 size-4" /> Collect with Velociraptor
++		</DropdownMenuItem>
+ 	{/if}
+ 	{#if caseAccess.canEdit() || isReviewer}
+ 		<DropdownMenuSeparator />
+@@ -539,3 +552,4 @@
+ 
+ <RequestReviewDialog bind:open={showRequestReview} onConfirm={(admin) => setReviewer(admin)} />
+ <CaseReportDialog bind:open={showReport} caseId={Number(page.params.case_id)} {reportType} />
++<VelociraptorCollectDialog bind:open={showVelociraptor} caseId={Number(page.params.case_id)} />
+diff --git a/src/lib/utils/velociraptor.ts b/src/lib/utils/velociraptor.ts
+new file mode 100644
+index 0000000..3a25db7
+--- /dev/null
++++ b/src/lib/utils/velociraptor.ts
+@@ -0,0 +1,46 @@
++export const VELOCIRAPTOR_CLIENT_ID_RE = /^C\.[0-9a-f]{16}$/;
++
++export type AssetCustomAttributes = Record<string, Record<string, unknown>> | null | undefined;
++
++const isRecord = (value: unknown): value is Record<string, unknown> =>
++	typeof value === 'object' && value !== null && !Array.isArray(value);
++
++const attributeValue = (value: unknown): string => {
++	const unwrapped = isRecord(value) && 'value' in value ? value.value : value;
++	return typeof unwrapped === 'string' ? unwrapped.trim() : '';
++};
++
++/** Read the ID from a case asset; tolerate legacy labels and plain values. */
++export const velociraptorClientId = (attributes: AssetCustomAttributes): string => {
++	for (const tabName of ['velociraptor', 'Velociraptor']) {
++		const tab = attributes?.[tabName];
++		if (!isRecord(tab)) continue;
++		for (const fieldName of ['client_id', 'Client ID', 'clientId']) {
++			const value = attributeValue(tab[fieldName]);
++			if (value) return value;
++		}
++	}
++	return '';
++};
++
++export const validVelociraptorClientId = (value: string): boolean =>
++	VELOCIRAPTOR_CLIENT_ID_RE.test(value.trim());
++
++/** Store the typed representation used by IRIS; preserve all other values. */
++export const withVelociraptorClientId = (
++	attributes: AssetCustomAttributes,
++	clientId: string
++): Record<string, Record<string, unknown>> => {
++	const normalized = clientId.trim();
++	if (!validVelociraptorClientId(normalized)) {
++		throw new Error('Velociraptor Client ID must match C.<16 lowercase hex characters>');
++	}
++	const currentTab = isRecord(attributes?.velociraptor) ? attributes.velociraptor : {};
++	return {
++		...(attributes ?? {}),
++		velociraptor: {
++			...currentTab,
++			client_id: { type: 'input_string', value: normalized }
++		}
++	};
++};
+diff --git a/src/lib/utils/__tests__/velociraptor.test.ts b/src/lib/utils/__tests__/velociraptor.test.ts
+new file mode 100644
+index 0000000..773086c
+--- /dev/null
++++ b/src/lib/utils/__tests__/velociraptor.test.ts
+@@ -0,0 +1,45 @@
++import { describe, expect, it } from 'vitest';
++import {
++	validVelociraptorClientId,
++	velociraptorClientId,
++	withVelociraptorClientId
++} from '../velociraptor';
++
++const CLIENT = 'C.0123456789abcdef';
++
++describe('Velociraptor asset attributes', () => {
++	it('reads the canonical typed client_id', () => {
++		expect(
++			velociraptorClientId({
++				velociraptor: { client_id: { type: 'input_string', value: ` ${CLIENT} ` } }
++			})
++		).toBe(CLIENT);
++	});
++
++	it('accepts legacy tab and field labels with plain values', () => {
++		expect(velociraptorClientId({ Velociraptor: { 'Client ID': CLIENT } })).toBe(CLIENT);
++		expect(velociraptorClientId({ velociraptor: { clientId: CLIENT } })).toBe(CLIENT);
++	});
++
++	it('validates the exact client ID shape', () => {
++		expect(validVelociraptorClientId(CLIENT)).toBe(true);
++		expect(validVelociraptorClientId('C.0123456789ABCDEF')).toBe(false);
++		expect(validVelociraptorClientId('hostname; DELETE')).toBe(false);
++	});
++
++	it('saves a typed attribute without mutating or dropping other values', () => {
++		const original = {
++			existing: { owner: 'soc' },
++			velociraptor: { note: 'keep me' }
++		};
++		const updated = withVelociraptorClientId(original, CLIENT);
++		expect(updated.existing).toEqual({ owner: 'soc' });
++		expect(updated.velociraptor.note).toBe('keep me');
++		expect(updated.velociraptor.client_id).toEqual({ type: 'input_string', value: CLIENT });
++		expect(original.velociraptor).toEqual({ note: 'keep me' });
++	});
++
++	it('rejects invalid input before an asset update can be sent', () => {
++		expect(() => withVelociraptorClientId({}, 'not-a-client')).toThrow('Client ID');
++	});
++});
+diff --git a/src/routes/(app)/case/[case_id]/components/VelociraptorCollectDialog.svelte b/src/routes/(app)/case/[case_id]/components/VelociraptorCollectDialog.svelte
+new file mode 100644
+index 0000000..224ade4
+--- /dev/null
++++ b/src/routes/(app)/case/[case_id]/components/VelociraptorCollectDialog.svelte
+@@ -0,0 +1,398 @@
++<script lang="ts">
++	import { getContext, untrack } from 'svelte';
++	import {
++		CheckCircle2Icon,
++		ExternalLinkIcon,
++		HardDriveUploadIcon,
++		Loader2Icon,
++		SaveIcon
++	} from 'lucide-svelte';
++	import { Button } from '$lib/components/ui/button';
++	import * as Dialog from '$lib/components/ui/dialog';
++	import { Input } from '$lib/components/ui/input';
++	import { Label } from '$lib/components/ui/label';
++	import { toast } from '$lib/components/ui/toast';
++	import { CaseAssetsService } from '$lib/services/case-assets.service';
++	import type { Asset } from '$lib/types/resources/asset';
++	import {
++		CASE_ASSETS_CTX,
++		type CaseAssetsContext
++	} from '$lib/contexts/case-assets.context.svelte';
++	import {
++		CASE_EVIDENCES_CTX,
++		type CaseEvidencesContext
++	} from '$lib/contexts/case-evidences.context.svelte';
++	import {
++		validVelociraptorClientId,
++		velociraptorClientId,
++		withVelociraptorClientId
++	} from '$lib/utils/velociraptor';
++
++	type Props = {
++		open: boolean;
++		caseId: number;
++	};
++
++	type CollectionResult = {
++		flow_id: string;
++		evidence_id: number | string;
++		sha256: string;
++		flow_link: string;
++		asset_id?: number | null;
++	};
++
++	let { open = $bindable(), caseId }: Props = $props();
++
++	const caseAssets = getContext<CaseAssetsContext>(CASE_ASSETS_CTX);
++	const caseEvidences = getContext<CaseEvidencesContext>(CASE_EVIDENCES_CTX);
++	const endpoint = '__TB_URL__/velociraptor/collect?key=__TB_KEY__';
++
++	let assets = $state<Asset[]>([]);
++	let selectedAssetId = $state('');
++	let clientId = $state('');
++	let confirmed = $state(false);
++	let busy = $state<'load' | 'save' | 'collect' | null>(null);
++	let error = $state('');
++	let result = $state<CollectionResult | null>(null);
++	let loadSequence = 0;
++
++	const selectedAsset = $derived(
++		assets.find((asset) => String(asset.asset_id) === selectedAssetId) ?? null
++	);
++	const validClientId = $derived(validVelociraptorClientId(clientId));
++
++	const selectAsset = (assetId: number | string) => {
++		selectedAssetId = String(assetId);
++		const asset = assets.find((item) => String(item.asset_id) === selectedAssetId);
++		clientId = asset ? velociraptorClientId(asset.custom_attributes) : '';
++		confirmed = false;
++		error = '';
++		result = null;
++	};
++
++	const loadAssets = async () => {
++		const sequence = ++loadSequence;
++		busy = 'load';
++		error = '';
++		result = null;
++		confirmed = false;
++		try {
++			const response = await CaseAssetsService.list(caseId, {
++				page: 1,
++				per_page: 1000,
++				order_by: 'asset_id',
++				sort_dir: 'asc'
++			});
++			if (sequence !== loadSequence) return;
++			if (!response.ok || response.error || !response.data || typeof response.data === 'string') {
++				throw new Error(response.error?.message ?? 'Failed to load case assets');
++			}
++			assets = response.data.data;
++			const preferred =
++				assets.find((asset) =>
++					validVelociraptorClientId(velociraptorClientId(asset.custom_attributes))
++				) ?? assets[0];
++			if (preferred) selectAsset(preferred.asset_id);
++			else {
++				selectedAssetId = '';
++				clientId = '';
++			}
++		} catch (cause) {
++			if (sequence === loadSequence) {
++				error = cause instanceof Error ? cause.message : 'Failed to load case assets';
++			}
++		} finally {
++			if (sequence === loadSequence) busy = null;
++		}
++	};
++
++	const saveClientId = async () => {
++		if (!selectedAsset) {
++			error = 'Select a case asset first';
++			return;
++		}
++		let customAttributes;
++		try {
++			customAttributes = withVelociraptorClientId(selectedAsset.custom_attributes, clientId);
++		} catch (cause) {
++			error = cause instanceof Error ? cause.message : 'Invalid Client ID';
++			return;
++		}
++
++		busy = 'save';
++		error = '';
++		try {
++			const response = await CaseAssetsService.update(caseId, selectedAsset.asset_id, {
++				custom_attributes: customAttributes
++			});
++			if (!response.ok || response.error || !response.data || typeof response.data === 'string') {
++				throw new Error(response.error?.message ?? 'Failed to update the case asset');
++			}
++			const updated = response.data;
++			assets = assets.map((asset) => (asset.asset_id === updated.asset_id ? updated : asset));
++			caseAssets.byId[updated.asset_id] = updated;
++			clientId = velociraptorClientId(updated.custom_attributes) || clientId.trim();
++			toast({
++				title: 'Velociraptor Client ID saved',
++				description: `Asset: ${updated.asset_name}`,
++				variant: 'success'
++			});
++		} catch (cause) {
++			error = cause instanceof Error ? cause.message : 'Failed to update the case asset';
++		} finally {
++			busy = null;
++		}
++	};
++
++	const collect = async () => {
++		if (!selectedAsset) {
++			error = 'Select a case asset first';
++			return;
++		}
++		if (!validClientId) {
++			error = 'Enter a valid Client ID: C.<16 lowercase hex characters>';
++			return;
++		}
++		if (!confirmed) {
++			error = 'Explicit confirmation is required before collection';
++			return;
++		}
++
++		busy = 'collect';
++		error = '';
++		result = null;
++		try {
++			const body = new URLSearchParams({
++				case_id: String(caseId),
++				asset_id: String(selectedAsset.asset_id),
++				client_id: clientId.trim(),
++				confirm: 'yes',
++				response: 'json'
++			});
++			const response = await fetch(endpoint, {
++				method: 'POST',
++				headers: {
++					Accept: 'application/json',
++					'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'
++				},
++				body
++			});
++			const payload = (await response.json().catch(() => null)) as
++				| (CollectionResult & { ok?: boolean; error?: string })
++				| null;
++			if (!response.ok || !payload?.ok) {
++				throw new Error(payload?.error ?? `TicketBridge returned HTTP ${response.status}`);
++			}
++			if (!payload.flow_id || !payload.flow_link || !payload.sha256) {
++				throw new Error('TicketBridge returned an incomplete collection result');
++			}
++			result = payload;
++			confirmed = false;
++			toast({
++				title: 'Velociraptor collection finished',
++				description: `Evidence #${payload.evidence_id} added to case #${caseId}`,
++				variant: 'success'
++			});
++			void caseEvidences.refresh();
++		} catch (cause) {
++			error = cause instanceof Error ? cause.message : 'Velociraptor collection failed';
++		} finally {
++			busy = null;
++		}
++	};
++
++	$effect(() => {
++		const isOpen = open;
++		untrack(() => {
++			if (isOpen) {
++				if (busy === null) void loadAssets();
++			} else {
++				loadSequence += 1;
++				confirmed = false;
++				error = '';
++				if (busy === 'load') busy = null;
++				if (busy === null) result = null;
++			}
++		});
++	});
++</script>
++
++<Dialog.Root bind:open>
++	<Dialog.Content class="flex max-h-[90vh] max-w-[620px] flex-col gap-0 overflow-hidden p-0">
++		<Dialog.Header class="shrink-0 border-b px-6 py-4">
++			<Dialog.Title class="flex items-center gap-2 text-base font-medium">
++				<HardDriveUploadIcon class="size-4" /> Collect with Velociraptor
++			</Dialog.Title>
++			<Dialog.Description>
++				Collect Generic.Client.Info from a case asset and attach the verified ZIP to Evidence.
++			</Dialog.Description>
++		</Dialog.Header>
++
++		<div class="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
++			{#if busy === 'load'}
++				<div class="flex items-center gap-2 text-sm text-muted-foreground">
++					<Loader2Icon class="size-4 animate-spin" /> Loading case assets…
++				</div>
++			{:else if assets.length === 0}
++				<div class="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
++					Add a host to the case assets first. Its Velociraptor Client ID can then be stored in
++					custom attributes.
++				</div>
++			{:else}
++				<div class="space-y-2">
++					<Label for="velociraptor-asset">Case asset</Label>
++					<select
++						id="velociraptor-asset"
++						class="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
++						value={selectedAssetId}
++						disabled={busy !== null}
++						onchange={(event) => selectAsset(event.currentTarget.value)}
++						data-testid="velociraptor-asset"
++					>
++						{#each assets as asset (asset.asset_id)}
++							<option value={String(asset.asset_id)}>
++								{asset.asset_name}{validVelociraptorClientId(
++									velociraptorClientId(asset.custom_attributes)
++								)
++									? ' — Client ID saved'
++									: ''}
++							</option>
++						{/each}
++					</select>
++					<p class="text-xs text-muted-foreground">
++						The selected asset is recorded in the Evidence collection metadata.
++					</p>
++				</div>
++
++				<div class="space-y-2">
++					<div class="flex items-center justify-between gap-3">
++						<Label for="velociraptor-client-id">Velociraptor Client ID</Label>
++						<Button
++							type="button"
++							variant="ghost"
++							size="sm"
++							disabled={busy !== null || !validClientId}
++							onclick={saveClientId}
++							data-testid="velociraptor-save-client-id"
++						>
++							{#if busy === 'save'}
++								<Loader2Icon class="size-4 animate-spin" /> Saving…
++							{:else}
++								<SaveIcon class="size-4" /> Save to asset
++							{/if}
++						</Button>
++					</div>
++					<Input
++						id="velociraptor-client-id"
++						value={clientId}
++						placeholder="C.0123456789abcdef"
++						autocomplete="off"
++						spellcheck={false}
++						disabled={busy !== null}
++						class={clientId && !validClientId ? 'border-destructive font-mono' : 'font-mono'}
++						oninput={(event) => {
++							clientId = event.currentTarget.value;
++							confirmed = false;
++							result = null;
++							error = '';
++						}}
++						data-testid="velociraptor-client-id"
++					/>
++					<p class="text-xs text-muted-foreground">
++						Stored as custom attributes → velociraptor → client_id. You can override it for this
++						collection or save it separately to the selected asset.
++					</p>
++				</div>
++
++				<div class="rounded-md border bg-muted/30 p-3 text-sm">
++					<div class="font-medium">Artifact: Generic.Client.Info</div>
++					<p class="mt-1 text-xs text-muted-foreground">
++						Arbitrary VQL, commands and artifact names are not accepted. Collection starts only
++						after confirmation and may take several minutes.
++					</p>
++				</div>
++
++				<label class="flex cursor-pointer items-start gap-3 text-sm" for="velociraptor-confirm">
++					<input
++						id="velociraptor-confirm"
++						type="checkbox"
++						class="mt-1 size-4"
++						checked={confirmed}
++						disabled={busy !== null || !selectedAsset || !validClientId}
++						onchange={(event) => {
++							confirmed = event.currentTarget.checked;
++							error = '';
++						}}
++						data-testid="velociraptor-confirm"
++					/>
++					<span
++						>I confirm collection from this host and upload of the resulting ZIP to Evidence.</span
++					>
++				</label>
++			{/if}
++
++			{#if error}
++				<div
++					class="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm"
++					role="alert"
++				>
++					{error}
++				</div>
++			{/if}
++
++			{#if result}
++				<div
++					class="space-y-3 rounded-md border border-emerald-600/40 bg-emerald-500/10 p-4 text-sm"
++				>
++					<div class="flex items-center gap-2 font-medium text-emerald-700 dark:text-emerald-300">
++						<CheckCircle2Icon class="size-4" /> Collection attached to Evidence
++					</div>
++					<dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
++						<dt class="text-muted-foreground">Flow</dt>
++						<dd class="font-mono">{result.flow_id}</dd>
++						<dt class="text-muted-foreground">Evidence ID</dt>
++						<dd>{result.evidence_id}</dd>
++						<dt class="text-muted-foreground">SHA-256</dt>
++						<dd class="break-all font-mono">{result.sha256}</dd>
++					</dl>
++					<div class="flex flex-wrap gap-2">
++						<Button
++							variant="outline"
++							size="sm"
++							href={`/case/${caseId}/evidence`}
++							onclick={() => (open = false)}
++						>
++							Open Evidence
++						</Button>
++						<Button
++							variant="outline"
++							size="sm"
++							href={result.flow_link}
++							target="_blank"
++							rel="noopener noreferrer"
++						>
++							Open Flow <ExternalLinkIcon class="size-3" />
++						</Button>
++					</div>
++				</div>
++			{/if}
++		</div>
++
++		<Dialog.Footer class="shrink-0 border-t px-6 py-4">
++			<Button variant="outline" disabled={busy !== null} onclick={() => (open = false)}>
++				{result ? 'Close' : 'Cancel'}
++			</Button>
++			<Button
++				disabled={busy !== null || !selectedAsset || !validClientId || !confirmed}
++				onclick={collect}
++				data-testid="velociraptor-run-collection"
++			>
++				{#if busy === 'collect'}
++					<Loader2Icon class="size-4 animate-spin" /> Collecting…
++				{:else}
++					<HardDriveUploadIcon class="size-4" /> Run collection
++				{/if}
++			</Button>
++		</Dialog.Footer>
++	</Dialog.Content>
++</Dialog.Root>
