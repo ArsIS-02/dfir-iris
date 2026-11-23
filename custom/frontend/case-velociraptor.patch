@@ -1,3 +1,332 @@
+diff --git a/src/lib/utils/__tests__/velociraptor.test.ts b/src/lib/utils/__tests__/velociraptor.test.ts
+new file mode 100644
+index 0000000..b16f940
+--- /dev/null
++++ b/src/lib/utils/__tests__/velociraptor.test.ts
+@@ -0,0 +1,145 @@
++import { describe, expect, it } from 'vitest';
++import {
++	defaultVelociraptorArtifacts,
++	parseVelociraptorCatalog,
++	recommendedVelociraptorArtifacts,
++	validVelociraptorClientId,
++	validVelociraptorSelection,
++	velociraptorClientId,
++	withVelociraptorClientId
++} from '../velociraptor';
++
++const CLIENT = 'C.0123456789abcdef';
++
++const catalog = parseVelociraptorCatalog({
++	schema_version: 1,
++	max_artifacts: 8,
++	manual_window_days: 30,
++	platforms: [
++		{
++			id: 'linux',
++			label: 'RED OS / Linux',
++			artifacts: [
++				{
++					name: 'Generic.Client.Info',
++					label: 'Host information',
++					description: 'Host',
++					recommended: true
++				},
++				{
++					name: 'Linux.Sys.Pslist',
++					label: 'Processes',
++					description: 'Processes',
++					recommended: true
++				},
++				{ name: 'Linux.Sys.Users', label: 'Users', description: 'Users', recommended: false }
++			]
++		},
++		{
++			id: 'darwin',
++			label: 'macOS',
++			artifacts: [
++				{
++					name: 'Generic.Client.Info',
++					label: 'Host information',
++					description: 'Host',
++					recommended: true
++				},
++				{ name: 'MacOS.System.Users', label: 'Users', description: 'Users', recommended: false }
++			]
++		},
++		{
++			id: 'windows',
++			label: 'Windows',
++			artifacts: [
++				{
++					name: 'Generic.Client.Info',
++					label: 'Host information',
++					description: 'Host',
++					recommended: true
++				},
++				{
++					name: 'Windows.System.Pslist',
++					label: 'Processes',
++					description: 'Processes',
++					recommended: true
++				}
++			]
++		}
++	]
++});
++
++describe('Velociraptor asset attributes', () => {
++	it('reads the canonical typed client_id', () => {
++		expect(
++			velociraptorClientId({
++				velociraptor: { client_id: { type: 'input_string', value: ` ${CLIENT} ` } }
++			})
++		).toBe(CLIENT);
++	});
++
++	it('accepts legacy tab and field labels with plain values', () => {
++		expect(velociraptorClientId({ Velociraptor: { 'Client ID': CLIENT } })).toBe(CLIENT);
++		expect(velociraptorClientId({ velociraptor: { clientId: CLIENT } })).toBe(CLIENT);
++	});
++
++	it('validates the exact client ID shape', () => {
++		expect(validVelociraptorClientId(CLIENT)).toBe(true);
++		expect(validVelociraptorClientId('C.0123456789ABCDEF')).toBe(false);
++		expect(validVelociraptorClientId('hostname; DELETE')).toBe(false);
++	});
++
++	it('saves a typed attribute without mutating or dropping other values', () => {
++		const original = {
++			existing: { owner: 'soc' },
++			velociraptor: { note: 'keep me' }
++		};
++		const updated = withVelociraptorClientId(original, CLIENT);
++		expect(updated.existing).toEqual({ owner: 'soc' });
++		expect(updated.velociraptor.note).toBe('keep me');
++		expect(updated.velociraptor.client_id).toEqual({ type: 'input_string', value: CLIENT });
++		expect(original.velociraptor).toEqual({ note: 'keep me' });
++	});
++
++	it('rejects invalid input before an asset update can be sent', () => {
++		expect(() => withVelociraptorClientId({}, 'not-a-client')).toThrow('Client ID');
++	});
++});
++
++describe('Velociraptor collection catalog', () => {
++	it('validates multi-selection against the selected operating system', () => {
++		expect(
++			validVelociraptorSelection(catalog, 'linux', ['Generic.Client.Info', 'Linux.Sys.Pslist'])
++		).toBe(true);
++		expect(validVelociraptorSelection(catalog, 'darwin', ['Linux.Sys.Pslist'])).toBe(false);
++		expect(validVelociraptorSelection(catalog, 'windows', ['Custom.Remediation.DeleteFile'])).toBe(
++			false
++		);
++		expect(validVelociraptorSelection(catalog, 'linux', [])).toBe(false);
++		expect(
++			validVelociraptorSelection(catalog, 'linux', ['Linux.Sys.Users', 'Linux.Sys.Users'])
++		).toBe(false);
++		expect(validVelociraptorSelection(catalog, 'linux', Array(9).fill('Linux.Sys.Users'))).toBe(
++			false
++		);
++	});
++
++	it('uses safe defaults and recommended choices per platform', () => {
++		expect(defaultVelociraptorArtifacts(catalog, 'linux')).toEqual(['Generic.Client.Info']);
++		expect(recommendedVelociraptorArtifacts(catalog, 'linux')).toEqual([
++			'Generic.Client.Info',
++			'Linux.Sys.Pslist'
++		]);
++		expect(recommendedVelociraptorArtifacts(catalog, 'windows')).toEqual([
++			'Generic.Client.Info',
++			'Windows.System.Pslist'
++		]);
++	});
++
++	it('rejects malformed catalogs and remediation entries', () => {
++		expect(() => parseVelociraptorCatalog(null)).toThrow('invalid artifact catalog');
++		const tampered = JSON.parse(JSON.stringify(catalog));
++		tampered.platforms[0].artifacts[0].name = 'Custom.Remediation.DeleteFile';
++		expect(() => parseVelociraptorCatalog(tampered)).toThrow('Invalid or duplicate artifact');
++	});
++});
+diff --git a/src/lib/utils/velociraptor.ts b/src/lib/utils/velociraptor.ts
+new file mode 100644
+index 0000000..436c28c
+--- /dev/null
++++ b/src/lib/utils/velociraptor.ts
+@@ -0,0 +1,172 @@
++export const VELOCIRAPTOR_CLIENT_ID_RE = /^C\.[0-9a-f]{16}$/;
++export const VELOCIRAPTOR_DEFAULT_ARTIFACT = 'Generic.Client.Info';
++
++export type VelociraptorPlatformId = 'linux' | 'darwin' | 'windows';
++
++export type VelociraptorArtifact = {
++	name: string;
++	label: string;
++	description: string;
++	recommended: boolean;
++};
++
++export type VelociraptorPlatform = {
++	id: VelociraptorPlatformId;
++	label: string;
++	artifacts: VelociraptorArtifact[];
++};
++
++export type VelociraptorCatalog = {
++	schema_version: 1;
++	max_artifacts: number;
++	manual_window_days: number;
++	platforms: VelociraptorPlatform[];
++};
++
++export type AssetCustomAttributes = Record<string, Record<string, unknown>> | null | undefined;
++
++const isRecord = (value: unknown): value is Record<string, unknown> =>
++	typeof value === 'object' && value !== null && !Array.isArray(value);
++
++/** Validate the server-provided allowlist before using it in the dialog. */
++export const parseVelociraptorCatalog = (value: unknown): VelociraptorCatalog => {
++	if (!isRecord(value) || value.schema_version !== 1 || !Array.isArray(value.platforms)) {
++		throw new Error('TicketBridge returned an invalid artifact catalog');
++	}
++	const maxArtifacts = Number(value.max_artifacts);
++	const windowDays = Number(value.manual_window_days);
++	if (!Number.isInteger(maxArtifacts) || maxArtifacts < 1 || maxArtifacts > 100) {
++		throw new Error('TicketBridge returned an invalid artifact limit');
++	}
++	if (!Number.isInteger(windowDays) || windowDays < 1 || windowDays > 365) {
++		throw new Error('TicketBridge returned an invalid collection window');
++	}
++	const platformIds = new Set<string>();
++	const platforms = value.platforms.map((rawPlatform) => {
++		if (
++			!isRecord(rawPlatform) ||
++			!['linux', 'darwin', 'windows'].includes(String(rawPlatform.id))
++		) {
++			throw new Error('TicketBridge returned an unknown collection platform');
++		}
++		const id = String(rawPlatform.id) as VelociraptorPlatformId;
++		if (platformIds.has(id) || typeof rawPlatform.label !== 'string' || !rawPlatform.label) {
++			throw new Error('TicketBridge returned a duplicate or unlabeled platform');
++		}
++		platformIds.add(id);
++		if (!Array.isArray(rawPlatform.artifacts) || rawPlatform.artifacts.length === 0) {
++			throw new Error(`TicketBridge returned no artifacts for ${id}`);
++		}
++		const names = new Set<string>();
++		const artifacts = rawPlatform.artifacts.map((rawArtifact) => {
++			if (!isRecord(rawArtifact)) throw new Error('Invalid artifact catalog entry');
++			const name = String(rawArtifact.name ?? '');
++			if (
++				!/^[A-Za-z][A-Za-z0-9_.]+$/.test(name) ||
++				names.has(name) ||
++				name.startsWith('Custom.Remediation.') ||
++				typeof rawArtifact.label !== 'string' ||
++				!rawArtifact.label ||
++				typeof rawArtifact.description !== 'string' ||
++				typeof rawArtifact.recommended !== 'boolean'
++			) {
++				throw new Error(`Invalid or duplicate artifact in catalog: ${name || 'unknown'}`);
++			}
++			names.add(name);
++			return {
++				name,
++				label: rawArtifact.label,
++				description: rawArtifact.description,
++				recommended: rawArtifact.recommended
++			};
++		});
++		return { id, label: rawPlatform.label, artifacts };
++	});
++	if (platformIds.size !== 3)
++		throw new Error('TicketBridge catalog must contain all three platforms');
++	return {
++		schema_version: 1,
++		max_artifacts: maxArtifacts,
++		manual_window_days: windowDays,
++		platforms
++	};
++};
++
++export const velociraptorPlatform = (
++	catalog: VelociraptorCatalog,
++	platform: string
++): VelociraptorPlatform | null => catalog.platforms.find((item) => item.id === platform) ?? null;
++
++export const defaultVelociraptorArtifacts = (
++	catalog: VelociraptorCatalog,
++	platform: string
++): string[] => {
++	const artifacts = velociraptorPlatform(catalog, platform)?.artifacts ?? [];
++	return artifacts.some((item) => item.name === VELOCIRAPTOR_DEFAULT_ARTIFACT)
++		? [VELOCIRAPTOR_DEFAULT_ARTIFACT]
++		: artifacts
++				.filter((item) => item.recommended)
++				.slice(0, 1)
++				.map((item) => item.name);
++};
++
++export const recommendedVelociraptorArtifacts = (
++	catalog: VelociraptorCatalog,
++	platform: string
++): string[] =>
++	(velociraptorPlatform(catalog, platform)?.artifacts ?? [])
++		.filter((item) => item.recommended)
++		.map((item) => item.name);
++
++export const validVelociraptorSelection = (
++	catalog: VelociraptorCatalog,
++	platform: string,
++	selected: string[]
++): boolean => {
++	if (selected.length === 0 || selected.length > catalog.max_artifacts) return false;
++	if (new Set(selected).size !== selected.length) return false;
++	const allowed = new Set(
++		(velociraptorPlatform(catalog, platform)?.artifacts ?? []).map((item) => item.name)
++	);
++	return selected.every((name) => allowed.has(name));
++};
++
++const attributeValue = (value: unknown): string => {
++	const unwrapped = isRecord(value) && 'value' in value ? value.value : value;
++	return typeof unwrapped === 'string' ? unwrapped.trim() : '';
++};
++
++/** Read the ID from a case asset; tolerate legacy labels and plain values. */
++export const velociraptorClientId = (attributes: AssetCustomAttributes): string => {
++	for (const tabName of ['velociraptor', 'Velociraptor']) {
++		const tab = attributes?.[tabName];
++		if (!isRecord(tab)) continue;
++		for (const fieldName of ['client_id', 'Client ID', 'clientId']) {
++			const value = attributeValue(tab[fieldName]);
++			if (value) return value;
++		}
++	}
++	return '';
++};
++
++export const validVelociraptorClientId = (value: string): boolean =>
++	VELOCIRAPTOR_CLIENT_ID_RE.test(value.trim());
++
++/** Store the typed representation used by IRIS; preserve all other values. */
++export const withVelociraptorClientId = (
++	attributes: AssetCustomAttributes,
++	clientId: string
++): Record<string, Record<string, unknown>> => {
++	const normalized = clientId.trim();
++	if (!validVelociraptorClientId(normalized)) {
++		throw new Error('Velociraptor Client ID must match C.<16 lowercase hex characters>');
++	}
++	const currentTab = isRecord(attributes?.velociraptor) ? attributes.velociraptor : {};
++	return {
++		...(attributes ?? {}),
++		velociraptor: {
++			...currentTab,
++			client_id: { type: 'input_string', value: normalized }
++		}
++	};
++};
 diff --git a/src/routes/(app)/case/[case_id]/+layout.svelte b/src/routes/(app)/case/[case_id]/+layout.svelte
 index f232f20..b89bf0b 100644
 --- a/src/routes/(app)/case/[case_id]/+layout.svelte
@@ -48,115 +377,12 @@ index f232f20..b89bf0b 100644
  <RequestReviewDialog bind:open={showRequestReview} onConfirm={(admin) => setReviewer(admin)} />
  <CaseReportDialog bind:open={showReport} caseId={Number(page.params.case_id)} {reportType} />
 +<VelociraptorCollectDialog bind:open={showVelociraptor} caseId={Number(page.params.case_id)} />
-diff --git a/src/lib/utils/velociraptor.ts b/src/lib/utils/velociraptor.ts
-new file mode 100644
-index 0000000..3a25db7
---- /dev/null
-+++ b/src/lib/utils/velociraptor.ts
-@@ -0,0 +1,46 @@
-+export const VELOCIRAPTOR_CLIENT_ID_RE = /^C\.[0-9a-f]{16}$/;
-+
-+export type AssetCustomAttributes = Record<string, Record<string, unknown>> | null | undefined;
-+
-+const isRecord = (value: unknown): value is Record<string, unknown> =>
-+	typeof value === 'object' && value !== null && !Array.isArray(value);
-+
-+const attributeValue = (value: unknown): string => {
-+	const unwrapped = isRecord(value) && 'value' in value ? value.value : value;
-+	return typeof unwrapped === 'string' ? unwrapped.trim() : '';
-+};
-+
-+/** Read the ID from a case asset; tolerate legacy labels and plain values. */
-+export const velociraptorClientId = (attributes: AssetCustomAttributes): string => {
-+	for (const tabName of ['velociraptor', 'Velociraptor']) {
-+		const tab = attributes?.[tabName];
-+		if (!isRecord(tab)) continue;
-+		for (const fieldName of ['client_id', 'Client ID', 'clientId']) {
-+			const value = attributeValue(tab[fieldName]);
-+			if (value) return value;
-+		}
-+	}
-+	return '';
-+};
-+
-+export const validVelociraptorClientId = (value: string): boolean =>
-+	VELOCIRAPTOR_CLIENT_ID_RE.test(value.trim());
-+
-+/** Store the typed representation used by IRIS; preserve all other values. */
-+export const withVelociraptorClientId = (
-+	attributes: AssetCustomAttributes,
-+	clientId: string
-+): Record<string, Record<string, unknown>> => {
-+	const normalized = clientId.trim();
-+	if (!validVelociraptorClientId(normalized)) {
-+		throw new Error('Velociraptor Client ID must match C.<16 lowercase hex characters>');
-+	}
-+	const currentTab = isRecord(attributes?.velociraptor) ? attributes.velociraptor : {};
-+	return {
-+		...(attributes ?? {}),
-+		velociraptor: {
-+			...currentTab,
-+			client_id: { type: 'input_string', value: normalized }
-+		}
-+	};
-+};
-diff --git a/src/lib/utils/__tests__/velociraptor.test.ts b/src/lib/utils/__tests__/velociraptor.test.ts
-new file mode 100644
-index 0000000..773086c
---- /dev/null
-+++ b/src/lib/utils/__tests__/velociraptor.test.ts
-@@ -0,0 +1,45 @@
-+import { describe, expect, it } from 'vitest';
-+import {
-+	validVelociraptorClientId,
-+	velociraptorClientId,
-+	withVelociraptorClientId
-+} from '../velociraptor';
-+
-+const CLIENT = 'C.0123456789abcdef';
-+
-+describe('Velociraptor asset attributes', () => {
-+	it('reads the canonical typed client_id', () => {
-+		expect(
-+			velociraptorClientId({
-+				velociraptor: { client_id: { type: 'input_string', value: ` ${CLIENT} ` } }
-+			})
-+		).toBe(CLIENT);
-+	});
-+
-+	it('accepts legacy tab and field labels with plain values', () => {
-+		expect(velociraptorClientId({ Velociraptor: { 'Client ID': CLIENT } })).toBe(CLIENT);
-+		expect(velociraptorClientId({ velociraptor: { clientId: CLIENT } })).toBe(CLIENT);
-+	});
-+
-+	it('validates the exact client ID shape', () => {
-+		expect(validVelociraptorClientId(CLIENT)).toBe(true);
-+		expect(validVelociraptorClientId('C.0123456789ABCDEF')).toBe(false);
-+		expect(validVelociraptorClientId('hostname; DELETE')).toBe(false);
-+	});
-+
-+	it('saves a typed attribute without mutating or dropping other values', () => {
-+		const original = {
-+			existing: { owner: 'soc' },
-+			velociraptor: { note: 'keep me' }
-+		};
-+		const updated = withVelociraptorClientId(original, CLIENT);
-+		expect(updated.existing).toEqual({ owner: 'soc' });
-+		expect(updated.velociraptor.note).toBe('keep me');
-+		expect(updated.velociraptor.client_id).toEqual({ type: 'input_string', value: CLIENT });
-+		expect(original.velociraptor).toEqual({ note: 'keep me' });
-+	});
-+
-+	it('rejects invalid input before an asset update can be sent', () => {
-+		expect(() => withVelociraptorClientId({}, 'not-a-client')).toThrow('Client ID');
-+	});
-+});
 diff --git a/src/routes/(app)/case/[case_id]/components/VelociraptorCollectDialog.svelte b/src/routes/(app)/case/[case_id]/components/VelociraptorCollectDialog.svelte
 new file mode 100644
-index 0000000..224ade4
+index 0000000..66777e5
 --- /dev/null
 +++ b/src/routes/(app)/case/[case_id]/components/VelociraptorCollectDialog.svelte
-@@ -0,0 +1,398 @@
+@@ -0,0 +1,635 @@
 +<script lang="ts">
 +	import { getContext, untrack } from 'svelte';
 +	import {
@@ -164,7 +390,8 @@ index 0000000..224ade4
 +		ExternalLinkIcon,
 +		HardDriveUploadIcon,
 +		Loader2Icon,
-+		SaveIcon
++		SaveIcon,
++		SearchIcon
 +	} from 'lucide-svelte';
 +	import { Button } from '$lib/components/ui/button';
 +	import * as Dialog from '$lib/components/ui/dialog';
@@ -182,9 +409,16 @@ index 0000000..224ade4
 +		type CaseEvidencesContext
 +	} from '$lib/contexts/case-evidences.context.svelte';
 +	import {
++		defaultVelociraptorArtifacts,
++		parseVelociraptorCatalog,
++		recommendedVelociraptorArtifacts,
 +		validVelociraptorClientId,
++		validVelociraptorSelection,
 +		velociraptorClientId,
-+		withVelociraptorClientId
++		velociraptorPlatform,
++		withVelociraptorClientId,
++		type VelociraptorCatalog,
++		type VelociraptorPlatformId
 +	} from '$lib/utils/velociraptor';
 +
 +	type Props = {
@@ -192,11 +426,28 @@ index 0000000..224ade4
 +		caseId: number;
 +	};
 +
-+	type CollectionResult = {
++	type CollectionFlow = {
++		artifact: string;
 +		flow_id: string;
++		flow_link: string;
++		state: string;
++		row_count: number;
++	};
++
++	type CollectionError = {
++		artifact: string;
++		error: string;
++	};
++
++	type CollectionResult = {
++		status: 'completed' | 'partial' | 'failed';
++		platform: VelociraptorPlatformId;
++		batch_id: string;
++		requested_artifacts: string[];
++		artifacts: CollectionFlow[];
++		errors: CollectionError[];
 +		evidence_id: number | string;
 +		sha256: string;
-+		flow_link: string;
 +		asset_id?: number | null;
 +	};
 +
@@ -205,9 +456,14 @@ index 0000000..224ade4
 +	const caseAssets = getContext<CaseAssetsContext>(CASE_ASSETS_CTX);
 +	const caseEvidences = getContext<CaseEvidencesContext>(CASE_EVIDENCES_CTX);
 +	const endpoint = '__TB_URL__/velociraptor/collect?key=__TB_KEY__';
++	const catalogEndpoint = '__TB_URL__/velociraptor/catalog?key=__TB_KEY__';
 +
 +	let assets = $state<Asset[]>([]);
++	let catalog = $state<VelociraptorCatalog | null>(null);
 +	let selectedAssetId = $state('');
++	let selectedPlatform = $state<VelociraptorPlatformId>('linux');
++	let selectedArtifacts = $state<string[]>([]);
++	let artifactSearch = $state('');
 +	let clientId = $state('');
 +	let confirmed = $state(false);
 +	let busy = $state<'load' | 'save' | 'collect' | null>(null);
@@ -218,15 +474,74 @@ index 0000000..224ade4
 +	const selectedAsset = $derived(
 +		assets.find((asset) => String(asset.asset_id) === selectedAssetId) ?? null
 +	);
++	const currentPlatform = $derived(
++		catalog ? velociraptorPlatform(catalog, selectedPlatform) : null
++	);
++	const filteredArtifacts = $derived.by(() => {
++		const query = artifactSearch.trim().toLowerCase();
++		const artifacts = currentPlatform?.artifacts ?? [];
++		if (!query) return artifacts;
++		return artifacts.filter((artifact) =>
++			`${artifact.name} ${artifact.label}`.toLowerCase().includes(query)
++		);
++	});
 +	const validClientId = $derived(validVelociraptorClientId(clientId));
++	const validSelection = $derived(
++		catalog ? validVelociraptorSelection(catalog, selectedPlatform, selectedArtifacts) : false
++	);
 +
-+	const selectAsset = (assetId: number | string) => {
-+		selectedAssetId = String(assetId);
-+		const asset = assets.find((item) => String(item.asset_id) === selectedAssetId);
-+		clientId = asset ? velociraptorClientId(asset.custom_attributes) : '';
++	const resetConfirmation = () => {
 +		confirmed = false;
 +		error = '';
 +		result = null;
++	};
++
++	const platformForAsset = (asset: Asset | null): VelociraptorPlatformId => {
++		const typeId = Number(asset?.asset_type_id ?? 0);
++		if (typeId === 6) return 'darwin';
++		if (typeId === 9 || typeId === 11) return 'windows';
++		return 'linux';
++	};
++
++	const selectPlatform = (platform: VelociraptorPlatformId) => {
++		if (!catalog) return;
++		selectedPlatform = platform;
++		selectedArtifacts = defaultVelociraptorArtifacts(catalog, platform);
++		artifactSearch = '';
++		resetConfirmation();
++	};
++
++	const selectAsset = (assetId: number | string) => {
++		selectedAssetId = String(assetId);
++		const asset = assets.find((item) => String(item.asset_id) === selectedAssetId) ?? null;
++		clientId = asset ? velociraptorClientId(asset.custom_attributes) : '';
++		selectPlatform(platformForAsset(asset));
++	};
++
++	const toggleArtifact = (artifact: string, checked: boolean) => {
++		if (!catalog || !currentPlatform?.artifacts.some((item) => item.name === artifact)) return;
++		if (checked && !selectedArtifacts.includes(artifact)) {
++			if (selectedArtifacts.length >= catalog.max_artifacts) {
++				resetConfirmation();
++				error = `Select no more than ${catalog.max_artifacts} artifacts per run`;
++				return;
++			}
++			selectedArtifacts = [...selectedArtifacts, artifact];
++		} else if (!checked) {
++			selectedArtifacts = selectedArtifacts.filter((item) => item !== artifact);
++		}
++		resetConfirmation();
++	};
++
++	const selectRecommended = () => {
++		if (!catalog) return;
++		selectedArtifacts = recommendedVelociraptorArtifacts(catalog, selectedPlatform);
++		resetConfirmation();
++	};
++
++	const clearArtifacts = () => {
++		selectedArtifacts = [];
++		resetConfirmation();
 +	};
 +
 +	const loadAssets = async () => {
@@ -236,16 +551,24 @@ index 0000000..224ade4
 +		result = null;
 +		confirmed = false;
 +		try {
-+			const response = await CaseAssetsService.list(caseId, {
-+				page: 1,
-+				per_page: 1000,
-+				order_by: 'asset_id',
-+				sort_dir: 'asc'
-+			});
++			const [response, catalogResponse] = await Promise.all([
++				CaseAssetsService.list(caseId, {
++					page: 1,
++					per_page: 1000,
++					order_by: 'asset_id',
++					sort_dir: 'asc'
++				}),
++				fetch(catalogEndpoint, { headers: { Accept: 'application/json' } })
++			]);
++			const rawCatalog = (await catalogResponse.json().catch(() => null)) as unknown;
++			if (!catalogResponse.ok)
++				throw new Error(`Artifact catalog returned HTTP ${catalogResponse.status}`);
++			const parsedCatalog = parseVelociraptorCatalog(rawCatalog);
 +			if (sequence !== loadSequence) return;
 +			if (!response.ok || response.error || !response.data || typeof response.data === 'string') {
 +				throw new Error(response.error?.message ?? 'Failed to load case assets');
 +			}
++			catalog = parsedCatalog;
 +			assets = response.data.data;
 +			const preferred =
 +				assets.find((asset) =>
@@ -255,10 +578,11 @@ index 0000000..224ade4
 +			else {
 +				selectedAssetId = '';
 +				clientId = '';
++				selectPlatform('linux');
 +			}
 +		} catch (cause) {
 +			if (sequence === loadSequence) {
-+				error = cause instanceof Error ? cause.message : 'Failed to load case assets';
++				error = cause instanceof Error ? cause.message : 'Failed to load collection options';
 +			}
 +		} finally {
 +			if (sequence === loadSequence) busy = null;
@@ -312,6 +636,10 @@ index 0000000..224ade4
 +			error = 'Enter a valid Client ID: C.<16 lowercase hex characters>';
 +			return;
 +		}
++		if (!catalog || !validSelection) {
++			error = 'Select at least one allowed artifact for the chosen operating system';
++			return;
++		}
 +		if (!confirmed) {
 +			error = 'Explicit confirmation is required before collection';
 +			return;
@@ -325,9 +653,11 @@ index 0000000..224ade4
 +				case_id: String(caseId),
 +				asset_id: String(selectedAsset.asset_id),
 +				client_id: clientId.trim(),
++				platform: selectedPlatform,
 +				confirm: 'yes',
 +				response: 'json'
 +			});
++			for (const artifact of selectedArtifacts) body.append('artifacts', artifact);
 +			const response = await fetch(endpoint, {
 +				method: 'POST',
 +				headers: {
@@ -342,15 +672,28 @@ index 0000000..224ade4
 +			if (!response.ok || !payload?.ok) {
 +				throw new Error(payload?.error ?? `TicketBridge returned HTTP ${response.status}`);
 +			}
-+			if (!payload.flow_id || !payload.flow_link || !payload.sha256) {
-+				throw new Error('TicketBridge returned an incomplete collection result');
++			if (
++				!payload.sha256 ||
++				!payload.evidence_id ||
++				payload.platform !== selectedPlatform ||
++				!Array.isArray(payload.artifacts) ||
++				!Array.isArray(payload.errors) ||
++				JSON.stringify(payload.requested_artifacts) !== JSON.stringify(selectedArtifacts) ||
++				payload.artifacts.some(
++					(flow) => !selectedArtifacts.includes(flow.artifact) || !flow.flow_id || !flow.flow_link
++				)
++			) {
++				throw new Error('TicketBridge returned an incomplete or mismatched collection result');
 +			}
 +			result = payload;
 +			confirmed = false;
 +			toast({
-+				title: 'Velociraptor collection finished',
-+				description: `Evidence #${payload.evidence_id} added to case #${caseId}`,
-+				variant: 'success'
++				title:
++					payload.status === 'completed'
++						? 'Velociraptor collection finished'
++						: 'Collection finished with errors',
++				description: `Evidence #${payload.evidence_id}; ${payload.artifacts.length} succeeded, ${payload.errors.length} failed`,
++				variant: payload.status === 'failed' ? 'destructive' : 'success'
 +			});
 +			void caseEvidences.refresh();
 +		} catch (cause) {
@@ -377,49 +720,147 @@ index 0000000..224ade4
 +</script>
 +
 +<Dialog.Root bind:open>
-+	<Dialog.Content class="flex max-h-[90vh] max-w-[620px] flex-col gap-0 overflow-hidden p-0">
++	<Dialog.Content class="flex max-h-[92vh] max-w-[760px] flex-col gap-0 overflow-hidden p-0">
 +		<Dialog.Header class="shrink-0 border-b px-6 py-4">
 +			<Dialog.Title class="flex items-center gap-2 text-base font-medium">
 +				<HardDriveUploadIcon class="size-4" /> Collect with Velociraptor
 +			</Dialog.Title>
 +			<Dialog.Description>
-+				Collect Generic.Client.Info from a case asset and attach the verified ZIP to Evidence.
++				Choose an operating system and one or more reviewed artifacts. Separate Flows are packaged
++				into one verified Evidence ZIP.
 +			</Dialog.Description>
 +		</Dialog.Header>
 +
 +		<div class="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
 +			{#if busy === 'load'}
 +				<div class="flex items-center gap-2 text-sm text-muted-foreground">
-+					<Loader2Icon class="size-4 animate-spin" /> Loading case assets…
++					<Loader2Icon class="size-4 animate-spin" /> Loading assets and the server-approved catalog…
 +				</div>
 +			{:else if assets.length === 0}
 +				<div class="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
 +					Add a host to the case assets first. Its Velociraptor Client ID can then be stored in
 +					custom attributes.
 +				</div>
-+			{:else}
-+				<div class="space-y-2">
-+					<Label for="velociraptor-asset">Case asset</Label>
-+					<select
-+						id="velociraptor-asset"
-+						class="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-+						value={selectedAssetId}
-+						disabled={busy !== null}
-+						onchange={(event) => selectAsset(event.currentTarget.value)}
-+						data-testid="velociraptor-asset"
++			{:else if catalog}
++				<div class="grid gap-4 sm:grid-cols-2">
++					<div class="space-y-2">
++						<Label for="velociraptor-asset">Case asset</Label>
++						<select
++							id="velociraptor-asset"
++							class="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
++							value={selectedAssetId}
++							disabled={busy !== null}
++							onchange={(event) => selectAsset(event.currentTarget.value)}
++							data-testid="velociraptor-asset"
++						>
++							{#each assets as asset (asset.asset_id)}
++								<option value={String(asset.asset_id)}>
++									{asset.asset_name}{validVelociraptorClientId(
++										velociraptorClientId(asset.custom_attributes)
++									)
++										? ' — Client ID saved'
++										: ''}
++								</option>
++							{/each}
++						</select>
++					</div>
++
++					<div class="space-y-2">
++						<Label for="velociraptor-platform">Operating system</Label>
++						<select
++							id="velociraptor-platform"
++							class="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
++							value={selectedPlatform}
++							disabled={busy !== null}
++							onchange={(event) =>
++								selectPlatform(event.currentTarget.value as VelociraptorPlatformId)}
++							data-testid="velociraptor-platform"
++						>
++							{#each catalog.platforms as platform (platform.id)}
++								<option value={platform.id}>{platform.label}</option>
++							{/each}
++						</select>
++					</div>
++				</div>
++				<p class="-mt-3 text-xs text-muted-foreground">
++					The asset type sets the initial OS. You can change it; TicketBridge verifies it against
++					the live Velociraptor client before creating any Flow.
++				</p>
++
++				<div class="space-y-3 rounded-md border p-4">
++					<div class="flex flex-wrap items-center justify-between gap-2">
++						<div>
++							<Label>Collection artifacts</Label>
++							<p class="mt-1 text-xs text-muted-foreground">
++								{selectedArtifacts.length} selected · maximum {catalog.max_artifacts} per run
++							</p>
++						</div>
++						<div class="flex gap-1">
++							<Button
++								type="button"
++								variant="ghost"
++								size="sm"
++								disabled={busy !== null}
++								onclick={selectRecommended}
++							>
++								Recommended
++							</Button>
++							<Button
++								type="button"
++								variant="ghost"
++								size="sm"
++								disabled={busy !== null}
++								onclick={clearArtifacts}
++							>
++								Clear
++							</Button>
++						</div>
++					</div>
++					<div class="relative">
++						<SearchIcon class="absolute left-3 top-3 size-4 text-muted-foreground" />
++						<Input
++							value={artifactSearch}
++							placeholder="Filter artifacts…"
++							class="pl-9"
++							disabled={busy !== null}
++							oninput={(event) => (artifactSearch = event.currentTarget.value)}
++							data-testid="velociraptor-artifact-search"
++						/>
++					</div>
++					<div
++						class="max-h-72 space-y-2 overflow-y-auto rounded-md border bg-muted/10 p-2"
++						data-testid="velociraptor-artifacts"
 +					>
-+						{#each assets as asset (asset.asset_id)}
-+							<option value={String(asset.asset_id)}>
-+								{asset.asset_name}{validVelociraptorClientId(
-+									velociraptorClientId(asset.custom_attributes)
-+								)
-+									? ' — Client ID saved'
-+									: ''}
-+							</option>
++						{#each filteredArtifacts as artifact, index (artifact.name)}
++							<label
++								class="flex cursor-pointer items-start gap-3 rounded-md p-2 text-sm hover:bg-muted/50"
++							>
++								<input
++									type="checkbox"
++									class="mt-1 size-4 shrink-0"
++									checked={selectedArtifacts.includes(artifact.name)}
++									disabled={busy !== null}
++									onchange={(event) => toggleArtifact(artifact.name, event.currentTarget.checked)}
++									data-testid={`velociraptor-artifact-${index}`}
++								/>
++								<span class="min-w-0">
++									<span class="block font-medium">{artifact.label}</span>
++									<span class="block break-all font-mono text-xs text-muted-foreground"
++										>{artifact.name}</span
++									>
++									<span class="mt-1 block text-xs text-muted-foreground"
++										>{artifact.description}</span
++									>
++								</span>
++							</label>
++						{:else}
++							<p class="p-3 text-sm text-muted-foreground">No artifacts match this filter.</p>
 +						{/each}
-+					</select>
++					</div>
 +					<p class="text-xs text-muted-foreground">
-+						The selected asset is recorded in the Evidence collection metadata.
++						Flows run sequentially with server-fixed parameters. Time-bounded artifacts use the last
++						{catalog.manual_window_days} days. Arbitrary VQL, commands, parameters and remediation are
++						forbidden.
 +					</p>
 +				</div>
 +
@@ -451,9 +892,7 @@ index 0000000..224ade4
 +						class={clientId && !validClientId ? 'border-destructive font-mono' : 'font-mono'}
 +						oninput={(event) => {
 +							clientId = event.currentTarget.value;
-+							confirmed = false;
-+							result = null;
-+							error = '';
++							resetConfirmation();
 +						}}
 +						data-testid="velociraptor-client-id"
 +					/>
@@ -463,30 +902,23 @@ index 0000000..224ade4
 +					</p>
 +				</div>
 +
-+				<div class="rounded-md border bg-muted/30 p-3 text-sm">
-+					<div class="font-medium">Artifact: Generic.Client.Info</div>
-+					<p class="mt-1 text-xs text-muted-foreground">
-+						Arbitrary VQL, commands and artifact names are not accepted. Collection starts only
-+						after confirmation and may take several minutes.
-+					</p>
-+				</div>
-+
 +				<label class="flex cursor-pointer items-start gap-3 text-sm" for="velociraptor-confirm">
 +					<input
 +						id="velociraptor-confirm"
 +						type="checkbox"
 +						class="mt-1 size-4"
 +						checked={confirmed}
-+						disabled={busy !== null || !selectedAsset || !validClientId}
++						disabled={busy !== null || !selectedAsset || !validClientId || !validSelection}
 +						onchange={(event) => {
 +							confirmed = event.currentTarget.checked;
 +							error = '';
 +						}}
 +						data-testid="velociraptor-confirm"
 +					/>
-+					<span
-+						>I confirm collection from this host and upload of the resulting ZIP to Evidence.</span
-+					>
++					<span>
++						I confirm collection of {selectedArtifacts.length} artifact(s) from this host and upload
++						of one combined ZIP to Evidence. Changing the OS, asset or artifacts requires a new confirmation.
++					</span>
 +				</label>
 +			{/if}
 +
@@ -501,38 +933,65 @@ index 0000000..224ade4
 +
 +			{#if result}
 +				<div
-+					class="space-y-3 rounded-md border border-emerald-600/40 bg-emerald-500/10 p-4 text-sm"
++					class={result.status === 'failed'
++						? 'space-y-3 rounded-md border border-destructive/40 bg-destructive/10 p-4 text-sm'
++						: 'space-y-3 rounded-md border border-emerald-600/40 bg-emerald-500/10 p-4 text-sm'}
 +				>
-+					<div class="flex items-center gap-2 font-medium text-emerald-700 dark:text-emerald-300">
-+						<CheckCircle2Icon class="size-4" /> Collection attached to Evidence
++					<div class="flex items-center gap-2 font-medium">
++						<CheckCircle2Icon class="size-4" />
++						{result.status === 'completed'
++							? 'Combined collection attached to Evidence'
++							: result.status === 'partial'
++								? 'Partial collection attached to Evidence'
++								: 'Error report attached to Evidence'}
 +					</div>
 +					<dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-+						<dt class="text-muted-foreground">Flow</dt>
-+						<dd class="font-mono">{result.flow_id}</dd>
++						<dt class="text-muted-foreground">Operating system</dt>
++						<dd>{result.platform}</dd>
++						<dt class="text-muted-foreground">Successful / failed</dt>
++						<dd>{result.artifacts.length} / {result.errors.length}</dd>
++						<dt class="text-muted-foreground">Batch ID</dt>
++						<dd class="font-mono">{result.batch_id}</dd>
 +						<dt class="text-muted-foreground">Evidence ID</dt>
 +						<dd>{result.evidence_id}</dd>
 +						<dt class="text-muted-foreground">SHA-256</dt>
 +						<dd class="break-all font-mono">{result.sha256}</dd>
 +					</dl>
-+					<div class="flex flex-wrap gap-2">
-+						<Button
-+							variant="outline"
-+							size="sm"
-+							href={`/case/${caseId}/evidence`}
-+							onclick={() => (open = false)}
-+						>
-+							Open Evidence
-+						</Button>
-+						<Button
-+							variant="outline"
-+							size="sm"
-+							href={result.flow_link}
-+							target="_blank"
-+							rel="noopener noreferrer"
-+						>
-+							Open Flow <ExternalLinkIcon class="size-3" />
-+						</Button>
-+					</div>
++					{#if result.artifacts.length}
++						<div class="space-y-1 text-xs">
++							<p class="font-medium">Completed Flows</p>
++							{#each result.artifacts as flow (flow.flow_id)}
++								<a
++									class="flex items-center gap-1 break-all text-primary underline"
++									href={flow.flow_link}
++									target="_blank"
++									rel="noopener noreferrer"
++								>
++									{flow.artifact} — {flow.flow_id} ({flow.row_count} rows) <ExternalLinkIcon
++										class="size-3 shrink-0"
++									/>
++								</a>
++							{/each}
++						</div>
++					{/if}
++					{#if result.errors.length}
++						<div class="space-y-1 text-xs">
++							<p class="font-medium">Collection errors</p>
++							{#each result.errors as item (item.artifact)}
++								<p class="break-all">
++									<span class="font-mono">{item.artifact}</span>: {item.error}
++								</p>
++							{/each}
++						</div>
++					{/if}
++					<Button
++						variant="outline"
++						size="sm"
++						href={`/case/${caseId}/evidence`}
++						onclick={() => (open = false)}
++					>
++						Open Evidence
++					</Button>
 +				</div>
 +			{/if}
 +		</div>
@@ -542,14 +1001,18 @@ index 0000000..224ade4
 +				{result ? 'Close' : 'Cancel'}
 +			</Button>
 +			<Button
-+				disabled={busy !== null || !selectedAsset || !validClientId || !confirmed}
++				disabled={busy !== null ||
++					!selectedAsset ||
++					!validClientId ||
++					!validSelection ||
++					!confirmed}
 +				onclick={collect}
 +				data-testid="velociraptor-run-collection"
 +			>
 +				{#if busy === 'collect'}
-+					<Loader2Icon class="size-4 animate-spin" /> Collecting…
++					<Loader2Icon class="size-4 animate-spin" /> Collecting {selectedArtifacts.length} artifact(s)…
 +				{:else}
-+					<HardDriveUploadIcon class="size-4" /> Run collection
++					<HardDriveUploadIcon class="size-4" /> Run {selectedArtifacts.length || ''} collection(s)
 +				{/if}
 +			</Button>
 +		</Dialog.Footer>
