@@ -226,11 +226,19 @@ class NotificationMailTest(unittest.TestCase):
         notification.event_type = 'case_assigned'
         notification.title = 'You were made the owner of a case'
         notification.body = 'Кейс <b>тест</b>'
+        notification.link = '/case/42'
         content = self.mail._notification_content(notification)
         html = self.mail.app.jinja_env.get_template('email/notification.html').render(**content)
-        self.assertEqual(content['event_label'], 'Вам назначен кейс')
+        plain = self.mail._plain_text(content)
+        self.assertEqual(content['event_label'], 'Вам назначен инцидент')
+        self.assertEqual(content['title'], 'You were made the owner of an incident')
+        self.assertEqual(content['description'], 'Инцидент <b>тест</b>')
+        self.assertEqual(content['iris_url'], 'https://iris.apps.monitoring.test/case/42')
         self.assertIsNone(content['source_url'])
-        self.assertIn('Кейс &lt;b&gt;тест&lt;/b&gt;', html)
+        self.assertIn('Инцидент &lt;b&gt;тест&lt;/b&gt;', html)
+        self.assertIn('Вам назначен инцидент', plain)
+        self.assertIn('/case/42', plain)
+        self.assertNotIn('Вам назначен кейс', plain)
 
     def test_multipart_message(self):
         config = SimpleNamespace(

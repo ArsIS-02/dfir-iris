@@ -1,0 +1,39 @@
+diff --git a/src/lib/components/common/cases-data-table.svelte b/src/lib/components/common/cases-data-table.svelte
+index 0075ba8..2c2ee55 100644
+--- a/src/lib/components/common/cases-data-table.svelte
++++ b/src/lib/components/common/cases-data-table.svelte
+@@ -122,7 +122,8 @@
+ 			cell: (cell) => fmtDate(cell.getValue() as string | null)
+ 		},
+ 		{
+-			accessorKey: 'close_date',
++			id: 'close_date',
++			accessorFn: (row) => row.closed_at ?? row.close_date,
+ 			header: () => 'Closed',
+ 			cell: (cell) => {
+ 				const raw = cell.getValue() as string | null;
+diff --git a/src/lib/types/resources/case.ts b/src/lib/types/resources/case.ts
+index 793b2ce..6b4e9a0 100644
+--- a/src/lib/types/resources/case.ts
++++ b/src/lib/types/resources/case.ts
+@@ -75,6 +75,7 @@ export interface Case {
+ 	open_date: string | null;
+ 	initial_date?: string | null;
+ 	close_date: string | null;
++	closed_at?: string | null;
+ 	closing_note: string | null;
+ 
+ 	/** Other */
+diff --git a/src/routes/(app)/manage/cases/+page.svelte b/src/routes/(app)/manage/cases/+page.svelte
+index 8a4dbb8..d475c63 100644
+--- a/src/routes/(app)/manage/cases/+page.svelte
++++ b/src/routes/(app)/manage/cases/+page.svelte
+@@ -834,7 +834,7 @@
+ 										<td
+ 											class="whitespace-nowrap px-3 py-2 text-xs tabular-nums text-muted-foreground"
+ 										>
+-											{formatDate(c.close_date)}
++											{formatDate(c.closed_at ?? c.close_date)}
+ 										</td>
+ 										<td class="px-3 py-2 text-xs">{c.case_soc_id || '—'}</td>
+ 										<td class="px-3 py-2 text-xs">

@@ -154,6 +154,53 @@ podman-compose up -d frontend
 При обновлении IRIS нужно сменить закреплённую ревизию в `custom/frontend/build.sh`,
 проверить применимость патча и повторить тесты, а не переносить его вслепую.
 
+## Точное время открытия кейсов
+
+В списке кейсов колонка **Opened** показывает существующее поле `initial_date` с точным временем,
+а не `open_date` типа `Date`, которое при форматировании выглядело как полночь. Backend отдаёт
+`initial_date` через `CaseSchemaForAPIV2` только для чтения; изменить его через API нельзя. Миграция
+БД не требуется: поле уже существует и заполняется при создании кейса. Для ответа старого backend
+frontend использует прежний `open_date` как fallback. Сортировка колонки выполняется по `initial_date`.
+
+Изменения закреплены в `custom/schema/marshables.py` и `custom/frontend/case-opened-at.patch`;
+schema монтируется только в контейнер `app`. Регрессионная проверка
+`custom/tests/test_case_initial_date_schema.py` подтверждает сериализацию точного timestamp и
+`dump_only`. Полный frontend-набор: **3180 тестов в 239 файлах**, `npm run check` — 0 ошибок
+(8 исходных предупреждений), production-сборка успешна. Обновление на сервере:
+`bash custom/frontend/build.sh && podman-compose up -d --force-recreate app frontend`.
+
+## Точное время закрытия кейсов
+
+В списке кейсов колонка **Close date** показывает вычисляемое read-only поле `closed_at`, а не
+`close_date` типа `Date`, которое при форматировании выглядело как полночь. Backend находит согласованное
+с `close_date` событие `case closed` в `Cases.modification_history`. Если его нет, используется последняя
+запись `Case closed` или `Closed case ID …` за ту же дату в `user_activity`. Для открытого кейса поле равно
+`null`; при ответе старого backend или отсутствии точной аудиторской записи frontend использует прежний
+`close_date` как fallback. Изменить `closed_at` через API нельзя.
+
+Миграция БД не требуется. Изменения закреплены в `custom/schema/marshables.py` и
+`custom/frontend/case-closed-at.patch`; schema монтируется только в контейнер `app`. Проверки
+`custom/tests/test_case_closed_at_schema.py` и `custom/tests/test_case_closed_at_patch.py` подтверждают
+выбор согласованного закрытия, резервный журнал, очистку после повторного открытия, `dump_only` и fallback.
+
+## Отображение Cases как Incidents
+
+Патч `custom/frontend/incident-terminology.patch` меняет только видимые подписи интерфейса:
+`Case/Cases/case/cases` и русские формы слова «кейс» отображаются как «Incident/Incidents/
+инцидент» с учётом регистра и падежа. Общий Svelte-action подключён к `<svelte:body>`, поэтому
+обрабатывает также динамические диалоги и порталы. Заголовок документа обновляется тоже.
+
+API, маршруты `/case/...`, `/manage/cases`, `case_id`, имена сервисов и значения в БД не меняются.
+Не обрабатываются значения полей ввода, редакторы, код и технические выражения вроде
+`case-sensitive`, `use case` и `CaseService`. В `placeholder`, `title` и `aria-label` меняется только
+безопасная отображаемая терминология. Почтовый модуль `custom/mail/outbound.py` отдельно
+нормализует `event_label`, `title` и `description`, включая `a case → an incident`; ссылки писем
+и технические `source_type='case'` сохраняются.
+
+Регрессии: **3186 frontend-тестов в 240 файлах**, 6 тестов `tests/test_notification_mail.py`,
+`npm run check` — 0 ошибок (8 исходных предупреждений), production-сборка успешна. Проверка
+состава патча — `custom/tests/test_incident_terminology_patch.py`. Миграция БД не требуется.
+
 ## Velociraptor: сбор из модального окна кейса
 
 Патч `custom/frontend/case-velociraptor.patch` добавляет **Case menu → Workflow →
@@ -184,7 +231,7 @@ Collect with Velociraptor**. Команда открывает диалог вн
 `TB_KEY='<secret>' TB_TICKETBRIDGE_URL='https://ticketbridge.example.test' bash custom/frontend/build.sh`.
 Полный набор: **3180 тестов в 239 файлах**, включая 8 профильных unit-тестов Velociraptor;
 `npm run check` — 0 ошибок (8 прежних предупреждений), production `npm run build` успешна.
-Оба патча проверены командой `git apply --check` относительно закреплённого upstream. Браузер
+Все пять frontend-патчей проверены командой `git apply --check` относительно закреплённого upstream. Браузер
 получает имена только из серверного каталога; состав allowlist и builders дополнительно проверен
 offline- и HTTP-тестами, включая отклонение кросс-платформенного выбора.
 

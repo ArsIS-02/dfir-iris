@@ -1,0 +1,283 @@
+diff --git a/src/routes/(app)/+layout.svelte b/src/routes/(app)/+layout.svelte
+index 52f54e0..39221d8 100644
+--- a/src/routes/(app)/+layout.svelte
++++ b/src/routes/(app)/+layout.svelte
+@@ -6,6 +6,7 @@
+ 	import ChatBotPanel from '$lib/components/common/ChatBot/ChatBotPanel.svelte';
+ 	import TopBanners from '$lib/components/common/TopBanners/TopBanners.svelte';
+ 	import { dismissedBanners } from '$lib/stores/dismissed-banners.store.svelte';
++	import { incidentTerminology } from '$lib/actions/incident-terminology';
+ 	import { CaseAddModal } from './[components]/CaseModals';
+ 	import TutorialOverlay from '$lib/components/tutorials/TutorialOverlay.svelte';
+ 	import TutorialRecorderPanel from '$lib/components/tutorials/TutorialRecorderPanel.svelte';
+@@ -91,6 +92,8 @@
+ 	{/if}
+ </svelte:head>
+ 
++<svelte:body use:incidentTerminology />
++
+ <div class="flex h-screen w-full overflow-hidden bg-background">
+ 	<SideBar />
+ 
+diff --git a/src/lib/actions/incident-terminology.ts b/src/lib/actions/incident-terminology.ts
+new file mode 100644
+index 0000000..7c0dd46
+--- /dev/null
++++ b/src/lib/actions/incident-terminology.ts
+@@ -0,0 +1,157 @@
++/**
++ * Presentation-only Case → Incident terminology.
++ *
++ * API payloads, routes, identifiers, form values and user-authored content are
++ * deliberately left untouched. The action is mounted on <svelte:body> so it
++ * also covers dialogs and other elements portalled outside the page container.
++ */
++
++const ENGLISH_TERMS: Record<string, string> = {
++	case: 'incident',
++	cases: 'incidents',
++	Case: 'Incident',
++	Cases: 'Incidents',
++	CASE: 'INCIDENT',
++	CASES: 'INCIDENTS'
++};
++
++const RUSSIAN_TERMS: Record<string, string> = {
++	кейс: 'инцидент',
++	кейса: 'инцидента',
++	кейсу: 'инциденту',
++	кейсом: 'инцидентом',
++	кейсе: 'инциденте',
++	кейсы: 'инциденты',
++	кейсов: 'инцидентов',
++	кейсам: 'инцидентам',
++	кейсами: 'инцидентами',
++	кейсах: 'инцидентах'
++};
++
++const ENGLISH_ARTICLE_PATTERN = /\b([aA]) (case)\b/g;
++const ENGLISH_PATTERN = /\b(cases|case|Cases|Case|CASES|CASE)\b/g;
++const RUSSIAN_PATTERN =
++	/(?<![\p{L}\p{N}_])(кейсами|кейсов|кейсам|кейсах|кейсом|кейса|кейсу|кейсе|кейсы|кейс)(?![\p{L}\p{N}_])/giu;
++const TECHNICAL_NEIGHBOURS = /[/\\_.-]/;
++const SKIPPED_SELECTOR =
++	'script, style, textarea, input, code, pre, noscript, [contenteditable="true"], [data-no-incident-rename]';
++const DISPLAY_ATTRIBUTES = new Set(['placeholder', 'title', 'aria-label']);
++
++function isTechnicalEnglishTerm(text: string, offset: number, length: number): boolean {
++	const before = text.slice(0, offset);
++	const after = text.slice(offset + length);
++	if (TECHNICAL_NEIGHBOURS.test(before.at(-1) ?? '')) return true;
++	if (TECHNICAL_NEIGHBOURS.test(after[0] ?? '')) return true;
++	return /\b(?:use|test)\s+$/i.test(before);
++}
++
++function russianCapitalization(source: string, target: string): string {
++	if (source === source.toUpperCase()) return target.toUpperCase();
++	if (source[0] === source[0]?.toUpperCase()) {
++		return target[0]?.toUpperCase() + target.slice(1);
++	}
++	return target;
++}
++
++/** Translate only display terminology; technical expressions are preserved. */
++export function incidentDisplayText(value: string): string {
++	if (!value) return value;
++
++	const withArticles = value.replace(
++		ENGLISH_ARTICLE_PATTERN,
++		(match: string, article: string, term: string, offset: number, source: string) => {
++			const termOffset = offset + article.length + 1;
++			if (isTechnicalEnglishTerm(source, termOffset, term.length)) return match;
++			return `${article === 'A' ? 'An' : 'an'} incident`;
++		}
++	);
++	return withArticles
++		.replace(ENGLISH_PATTERN, (term, _capture, offset: number, source: string) =>
++			isTechnicalEnglishTerm(source, offset, term.length) ? term : ENGLISH_TERMS[term]
++		)
++		.replace(RUSSIAN_PATTERN, (term: string) => {
++			const replacement = RUSSIAN_TERMS[term.toLocaleLowerCase('ru-RU')];
++			return replacement ? russianCapitalization(term, replacement) : term;
++		});
++}
++
++function skipped(node: Node): boolean {
++	const element = node.nodeType === 1 ? (node as Element) : node.parentElement;
++	return element?.closest(SKIPPED_SELECTOR) != null;
++}
++
++export function incidentTerminology(node: HTMLElement) {
++	const document = node.ownerDocument;
++
++	function translateText(text: Text): void {
++		if (skipped(text)) return;
++		const translated = incidentDisplayText(text.nodeValue ?? '');
++		if (translated !== text.nodeValue) text.nodeValue = translated;
++	}
++
++	function translateAttribute(element: Element, attribute: string): void {
++		if (!DISPLAY_ATTRIBUTES.has(attribute)) return;
++		if (element.closest('[contenteditable="true"], [data-no-incident-rename], code, pre')) return;
++		const value = element.getAttribute(attribute);
++		if (value == null) return;
++		const translated = incidentDisplayText(value);
++		if (translated !== value) element.setAttribute(attribute, translated);
++	}
++
++	function translateAttributes(element: Element): void {
++		for (const attribute of DISPLAY_ATTRIBUTES) translateAttribute(element, attribute);
++	}
++
++	function translateTree(root: Node): void {
++		if (root.nodeType === 3) {
++			translateText(root as Text);
++			return;
++		}
++		if (root.nodeType !== 1 && root.nodeType !== 11) return;
++
++		const element = root as Element | DocumentFragment;
++		if (root.nodeType === 1) translateAttributes(root as Element);
++		for (const descendant of element.querySelectorAll('[placeholder], [title], [aria-label]')) {
++			translateAttributes(descendant);
++		}
++
++		const walker = document.createTreeWalker(root, 4 /* NodeFilter.SHOW_TEXT */);
++		let current = walker.nextNode();
++		while (current) {
++			translateText(current as Text);
++			current = walker.nextNode();
++		}
++	}
++
++	translateTree(node);
++
++	// The document title lives in <head>, outside the body-mounted action.
++	const title = document.querySelector('title');
++	if (title) translateTree(title);
++
++	const observer = new MutationObserver((mutations) => {
++		for (const mutation of mutations) {
++			if (mutation.type === 'characterData') {
++				translateText(mutation.target as Text);
++			} else if (mutation.type === 'attributes' && mutation.attributeName) {
++				translateAttribute(mutation.target as Element, mutation.attributeName);
++			} else {
++				for (const added of mutation.addedNodes) translateTree(added);
++			}
++		}
++	});
++	observer.observe(node, {
++		subtree: true,
++		childList: true,
++		characterData: true,
++		attributes: true,
++		attributeFilter: [...DISPLAY_ATTRIBUTES]
++	});
++	if (title) observer.observe(title, { subtree: true, childList: true, characterData: true });
++
++	return {
++		destroy() {
++			observer.disconnect();
++		}
++	};
++}
+diff --git a/src/lib/actions/__tests__/incident-terminology.test.ts b/src/lib/actions/__tests__/incident-terminology.test.ts
+new file mode 100644
+index 0000000..a9d55c5
+--- /dev/null
++++ b/src/lib/actions/__tests__/incident-terminology.test.ts
+@@ -0,0 +1,93 @@
++import { describe, expect, it } from 'vitest';
++import { incidentDisplayText, incidentTerminology } from '../incident-terminology';
++
++const nextMutation = () => new Promise((resolve) => setTimeout(resolve, 0));
++
++describe('incidentDisplayText', () => {
++	it('translates English display labels while preserving capitalization and grammar', () => {
++		expect(
++			incidentDisplayText('Manage cases · Every case · Search cases · Case #42 · CASES · CASE')
++		).toBe(
++			'Manage incidents · Every incident · Search incidents · Incident #42 · INCIDENTS · INCIDENT'
++		);
++		expect(incidentDisplayText('A case and a case')).toBe('An incident and an incident');
++	});
++
++	it('translates Russian inflections', () => {
++		expect(
++			incidentDisplayText('Кейс кейса кейсу кейсом кейсе кейсы кейсов кейсам кейсами кейсах КЕЙС')
++		).toBe(
++			'Инцидент инцидента инциденту инцидентом инциденте инциденты инцидентов инцидентам инцидентами инцидентах ИНЦИДЕНТ'
++		);
++	});
++
++	it('preserves routes, identifiers, service names and technical expressions', () => {
++		const technical =
++			'/api/v2/cases /case/42 case_id CaseService case-sensitive Case-sensitive case-insensitive use Case use case test Case test case';
++		expect(incidentDisplayText(technical)).toBe(technical);
++		expect(incidentDisplayText('Case: /case/42')).toBe('Incident: /case/42');
++	});
++
++	it('is idempotent', () => {
++		const once = incidentDisplayText('Cases — Кейсы');
++		expect(incidentDisplayText(once)).toBe(once);
++	});
++});
++
++describe('incidentTerminology', () => {
++	it('translates visible labels and safe attributes without changing technical content', () => {
++		const host = document.createElement('div');
++		host.innerHTML = `
++			<span>Cases</span>
++			<input placeholder="Case name" value="Case name" />
++			<textarea>Case</textarea>
++			<pre>Case</pre>
++			<div contenteditable="true">Case</div>
++			<a href="/case/42" title="Open Case" aria-label="Open Case">Case</a>
++		`;
++		document.body.append(host);
++		const action = incidentTerminology(host);
++
++		expect(host.querySelector('span')?.textContent).toBe('Incidents');
++		expect(host.querySelector('input')?.getAttribute('placeholder')).toBe('Incident name');
++		expect(host.querySelector('input')?.value).toBe('Case name');
++		expect(host.querySelector('textarea')?.textContent).toBe('Case');
++		expect(host.querySelector('pre')?.textContent).toBe('Case');
++		expect(host.querySelector('[contenteditable]')?.textContent).toBe('Case');
++		expect(host.querySelector('a')?.getAttribute('href')).toBe('/case/42');
++		expect(host.querySelector('a')?.getAttribute('title')).toBe('Open Incident');
++		expect(host.querySelector('a')?.getAttribute('aria-label')).toBe('Open Incident');
++		expect(host.querySelector('a')?.textContent).toBe('Incident');
++
++		action.destroy();
++		host.remove();
++	});
++
++	it('handles dynamic nodes, text updates and attributes', async () => {
++		const host = document.createElement('div');
++		document.body.append(host);
++		const action = incidentTerminology(host);
++
++		const button = document.createElement('button');
++		button.textContent = 'Open Cases';
++		button.setAttribute('title', 'Case actions');
++		host.append(button);
++		await nextMutation();
++		expect(button.textContent).toBe('Open Incidents');
++		expect(button.getAttribute('title')).toBe('Incident actions');
++
++		button.textContent = 'CASES';
++		await nextMutation();
++		expect(button.textContent).toBe('INCIDENTS');
++
++		button.setAttribute('aria-label', 'Case menu');
++		await nextMutation();
++		expect(button.getAttribute('aria-label')).toBe('Incident menu');
++
++		action.destroy();
++		button.textContent = 'Cases';
++		await nextMutation();
++		expect(button.textContent).toBe('Cases');
++		host.remove();
++	});
++});

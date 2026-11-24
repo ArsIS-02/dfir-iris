@@ -1,0 +1,7 @@
+FROM localhost/iris-frontend-homelab:v3.0.0-beta.23-dfir
+USER root
+RUN grep -rl 'http://redos-server.monitoring.test:8099/velociraptor/collect' /app/build \
+    | xargs sed -i 's#http://redos-server.monitoring.test:8099/velociraptor/collect#https://ticketbridge.apps.monitoring.test/velociraptor/collect#g'
+RUN ! grep -rq 'http://redos-server.monitoring.test:8099/velociraptor/collect' /app/build \
+    && grep -rq 'https://ticketbridge.apps.monitoring.test/velociraptor/collect' /app/build
+USER node

@@ -37,8 +37,8 @@ logger = logging.getLogger(__name__)
 _EVENT_LABELS = {
     'mention': 'Вас упомянули',
     'task_assigned': 'Вам назначена задача',
-    'case_state_change': 'Изменилось состояние кейса',
-    'case_assigned': 'Вам назначен кейс',
+    'case_state_change': 'Изменилось состояние инцидента',
+    'case_assigned': 'Вам назначен инцидент',
     'alert_created': 'Новый алерт',
     'alert_assigned': 'Вам назначен алерт',
     'alert_escalated': 'Алерт эскалирован',
@@ -47,6 +47,70 @@ _EVENT_LABELS = {
     'ai_suggestion': 'Новое предложение ИИ',
     'module_custom': 'Уведомление модуля',
 }
+
+# Presentation-only terminology. Event keys, source types, object IDs and URLs
+# keep their canonical "case" values throughout the API and database.
+_ENGLISH_DISPLAY_ARTICLE = re.compile(r'\b([aA]) (case)\b')
+_ENGLISH_DISPLAY_TERMS = re.compile(r'\b(cases|case|Cases|Case|CASES|CASE)\b')
+_RUSSIAN_DISPLAY_TERMS = re.compile(
+    r'(?<![^\W_])(кейсами|кейсов|кейсам|кейсах|кейсом|кейса|кейсу|кейсе|кейсы|кейс)(?![^\W_])',
+    re.IGNORECASE,
+)
+_RUSSIAN_INCIDENTS = {
+    'кейс': 'инцидент',
+    'кейса': 'инцидента',
+    'кейсу': 'инциденту',
+    'кейсом': 'инцидентом',
+    'кейсе': 'инциденте',
+    'кейсы': 'инциденты',
+    'кейсов': 'инцидентов',
+    'кейсам': 'инцидентам',
+    'кейсами': 'инцидентами',
+    'кейсах': 'инцидентах',
+}
+
+
+def _display_terms(value: Any) -> Any:
+    if not isinstance(value, str) or not value:
+        return value
+
+    def technical(match: re.Match, group: int = 1) -> bool:
+        before = value[:match.start(group)]
+        after = value[match.end(group):]
+        return bool((before and before[-1] in '/\\_.-')
+                    or (after and after[0] in '/\\_.-')
+                    or re.search(r'\b(?:use|test)\s+$', before, re.IGNORECASE))
+
+    def article(match: re.Match) -> str:
+        if technical(match, 2):
+            return match.group(0)
+        return ('An' if match.group(1) == 'A' else 'an') + ' incident'
+
+    value = _ENGLISH_DISPLAY_ARTICLE.sub(article, value)
+
+    def english(match: re.Match) -> str:
+        term = match.group(1)
+        if technical(match):
+            return term
+        return {
+            'case': 'incident', 'cases': 'incidents',
+            'Case': 'Incident', 'Cases': 'Incidents',
+            'CASE': 'INCIDENT', 'CASES': 'INCIDENTS',
+        }[term]
+
+    value = _ENGLISH_DISPLAY_TERMS.sub(english, value)
+
+    def russian(match: re.Match) -> str:
+        term = match.group(1)
+        replacement = _RUSSIAN_INCIDENTS[term.lower()]
+        if term.isupper():
+            return replacement.upper()
+        if term[:1].isupper():
+            return replacement[:1].upper() + replacement[1:]
+        return replacement
+
+    return _RUSSIAN_DISPLAY_TERMS.sub(russian, value)
+
 
 _SEVERITIES = {
     'critical': ('CRITICAL', 'критическая', '#f38ba8'),
@@ -520,9 +584,9 @@ def _notification_content(notification: Any) -> dict[str, Any]:
         alert_id = None
 
     return {
-        'event_label': event_label,
-        'title': title,
-        'description': description,
+        'event_label': _display_terms(event_label),
+        'title': _display_terms(title),
+        'description': _display_terms(description),
         'severity': severity,
         'fields': fields,
         'technical_fields': technical_fields,

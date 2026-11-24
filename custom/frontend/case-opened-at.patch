@@ -1,0 +1,39 @@
+diff --git a/src/lib/components/common/cases-data-table.svelte b/src/lib/components/common/cases-data-table.svelte
+index c8b36f4..0075ba8 100644
+--- a/src/lib/components/common/cases-data-table.svelte
++++ b/src/lib/components/common/cases-data-table.svelte
+@@ -116,7 +116,8 @@
+ 			cell: (cell) => String(cell.getValue() ?? '—')
+ 		},
+ 		{
+-			accessorKey: 'open_date',
++			id: 'initial_date',
++			accessorFn: (row) => row.initial_date ?? row.open_date,
+ 			header: () => 'Opened',
+ 			cell: (cell) => fmtDate(cell.getValue() as string | null)
+ 		},
+diff --git a/src/routes/(app)/manage/cases/+page.svelte b/src/routes/(app)/manage/cases/+page.svelte
+index 965da9f..8a4dbb8 100644
+--- a/src/routes/(app)/manage/cases/+page.svelte
++++ b/src/routes/(app)/manage/cases/+page.svelte
+@@ -829,7 +829,7 @@
+ 										<td
+ 											class="whitespace-nowrap px-3 py-2 text-xs tabular-nums text-muted-foreground"
+ 										>
+-											{formatDate(c.open_date)}
++											{formatDate(c.initial_date ?? c.open_date)}
+ 										</td>
+ 										<td
+ 											class="whitespace-nowrap px-3 py-2 text-xs tabular-nums text-muted-foreground"
+diff --git a/src/lib/types/resources/case.ts b/src/lib/types/resources/case.ts
+index 8834999..793b2ce 100644
+--- a/src/lib/types/resources/case.ts
++++ b/src/lib/types/resources/case.ts
+@@ -73,6 +73,7 @@ export interface Case {
+ 	/** Timings */
+ 
+ 	open_date: string | null;
++	initial_date?: string | null;
+ 	close_date: string | null;
+ 	closing_note: string | null;
+ 
