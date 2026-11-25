@@ -220,28 +220,42 @@ Collect with Velociraptor**. Команда открывает диалог вн
 используются последние 30 дней. Для двух DNF-правил в описании указано обращение к репозиториям;
 `SuspiciousXattrs` явно ограничен первым уровнем каталогов.
 
+Подтверждённый запуск выполняется с `async=1`: backend возвращает HTTP 202 и `job_id`, а диалог
+отслеживает фоновую задачу через `GET /velociraptor/jobs/{job_id}`. После закрытия и повторного
+открытия диалог восстанавливает последний результат по `case_id` или `alert_id` без нового POST
+и без повторного Flow. Ручная смена актива, ОС или артефактов по-прежнему сбрасывает результат,
+но позднее завершение автоматического resolver Client ID восстановленный результат не удаляет.
+Для запуска из алерта после завершения добавляется комментарий со статусом, Job ID, Evidence ID,
+SHA-256 и ссылками на Flow. Live-проверки 25.11.2026: сбор из инцидента №90 создал Evidence №113,
+сбор из алерта №1431 — Evidence №114; восстановление обоих результатов подтверждено. Контролируемый
+сбой доставки `evidence_error` на production не проводился.
+
 **Обязательное условие:** в **Settings → Custom Attributes → Assets** должна быть объявлена
 вкладка `velociraptor` с полем `client_id` типа `input_string` (`value: ""`, `mandatory: false`).
 Иначе IRIS возвращает HTTP 200 на обновление актива, но отбрасывает неизвестное поле. Схему нужно
 сохранять обычным additive-режимом **Save**, не Partial/Complete overwrite. После настройки следует
 повторно прочитать актив и убедиться, что Client ID сохранился и автозаполняется в диалоге.
 
-Сборка требует `TB_KEY` и `TB_TICKETBRIDGE_URL`; секрет и реальный origin подставляются
-только в локальный build context и не хранятся в патче. Например:
-`TB_KEY='<secret>' TB_TICKETBRIDGE_URL='https://ticketbridge.example.test' bash custom/frontend/build.sh`.
-Полный набор: **3180 тестов в 239 файлах**, включая 8 профильных unit-тестов Velociraptor;
-`npm run check` — 0 ошибок (8 прежних предупреждений), production `npm run build` успешна.
+Сборка требует `TB_KEY` и `TB_TICKETBRIDGE_URL`; секрет и адрес подставляются
+только в локальный build context и не хранятся в патче. Рекомендуемый вариант —
+`TB_TICKETBRIDGE_URL='/'`: браузер обращается к `/velociraptor/...` на том же origin, что и IRIS,
+а внешний reverse-proxy направляет этот путь в TicketBridge. Это устраняет отдельные CORS- и CSP-проверки.
+Для прямого междоменного подключения вместо `/` указывается полный origin TicketBridge. Например:
+`TB_KEY='<secret>' TB_TICKETBRIDGE_URL='/' bash custom/frontend/build.sh`.
+Полный набор: **3186 тестов в 239 файлах**; `npm run check` — 0 ошибок (10 предупреждений),
+production `npm run build` успешна.
 Все пять frontend-патчей проверены командой `git apply --check` относительно закреплённого upstream. Браузер
 получает имена только из серверного каталога; состав allowlist и builders дополнительно проверен
 offline- и HTTP-тестами, включая отклонение кросс-платформенного выбора.
 
-Для запроса из браузера origin TicketBridge должен быть явно добавлен в `connect-src` политики
+При same-origin схеме отдельный origin TicketBridge в `connect-src` не нужен. Если выбрано прямое
+междоменное подключение, origin TicketBridge должен быть явно добавлен в `connect-src` политики
 CSP nginx. Пример находится в `custom/nginx.conf`: перед сборкой замените
 `https://ticketbridge.example.test` на свой origin, а `iris.example.test` — на свой `server_name`.
-`custom/Containerfile.nginx` собирает образ
-с этой конфигурацией. Нельзя использовать `*` вместо конкретного origin. После изменения нужно
-проверить ответный заголовок и preflight `OPTIONS`. Иначе браузер покажет `Failed to fetch` ещё
-до отправки POST, не создав Flow. Интеграционная проверка подтвердила загрузку Evidence ZIP,
+`custom/Containerfile.nginx` собирает образ с этой конфигурацией. Нельзя использовать `*` вместо
+конкретного origin. После изменения нужно проверить ответный заголовок и preflight `OPTIONS`.
+Иначе браузер покажет `Failed to fetch` ещё до отправки POST, не создав Flow.
+Интеграционная проверка подтвердила загрузку Evidence ZIP,
 корректные `case_id` и `asset_id`, состояние Flow `FINISHED` и контрольные суммы manifest.
 
 ## Whitelist и blacklist

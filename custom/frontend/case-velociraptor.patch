@@ -1,17 +1,19 @@
 diff --git a/src/lib/utils/__tests__/velociraptor.test.ts b/src/lib/utils/__tests__/velociraptor.test.ts
 new file mode 100644
-index 0000000..b16f940
+index 0000000..90e298d
 --- /dev/null
 +++ b/src/lib/utils/__tests__/velociraptor.test.ts
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,196 @@
 +import { describe, expect, it } from 'vitest';
 +import {
 +	defaultVelociraptorArtifacts,
 +	parseVelociraptorCatalog,
++	parseVelociraptorResolvedClient,
 +	recommendedVelociraptorArtifacts,
 +	validVelociraptorClientId,
 +	validVelociraptorSelection,
 +	velociraptorClientId,
++	velociraptorResolveClientUrl,
 +	withVelociraptorClientId
 +} from '../velociraptor';
 +
@@ -149,12 +151,61 @@ index 0000000..b16f940
 +		expect(() => parseVelociraptorCatalog(tampered)).toThrow('Invalid or duplicate artifact');
 +	});
 +});
++
++describe('Velociraptor client resolver', () => {
++	it('builds same-origin resolver URLs and preserves absolute endpoints', () => {
++		expect(
++			velociraptorResolveClientUrl(
++				'/velociraptor/resolve-client?key=test',
++				'host name.example.test',
++				'https://iris.example.test'
++			)
++		).toBe(
++			'https://iris.example.test/velociraptor/resolve-client?key=test&hostname=host+name.example.test'
++		);
++		expect(
++			velociraptorResolveClientUrl(
++				'https://ticketbridge.example.test/velociraptor/resolve-client?key=test',
++				'host.example.test',
++				'https://iris.example.test'
++			)
++		).toBe(
++			'https://ticketbridge.example.test/velociraptor/resolve-client?key=test&hostname=host.example.test'
++		);
++	});
++
++	it('accepts only a valid resolved client and supported live platform', () => {
++		expect(
++			parseVelociraptorResolvedClient({
++				ok: true,
++				client_id: ` ${CLIENT} `,
++				platform: 'linux',
++				hostname: 'server-01',
++				fqdn: 'server-01.example.test'
++			})
++		).toEqual({
++			clientId: CLIENT,
++			platform: 'linux',
++			hostname: 'server-01',
++			fqdn: 'server-01.example.test'
++		});
++	});
++
++	it.each([
++		null,
++		{ ok: false, client_id: CLIENT, platform: 'linux' },
++		{ ok: true, client_id: 'not-a-client', platform: 'linux' },
++		{ ok: true, client_id: CLIENT, platform: 'solaris' }
++	])('rejects a malformed resolver response: %j', (payload) => {
++		expect(() => parseVelociraptorResolvedClient(payload)).toThrow('invalid');
++	});
++});
 diff --git a/src/lib/utils/velociraptor.ts b/src/lib/utils/velociraptor.ts
 new file mode 100644
-index 0000000..436c28c
+index 0000000..4a83dcf
 --- /dev/null
 +++ b/src/lib/utils/velociraptor.ts
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,210 @@
 +export const VELOCIRAPTOR_CLIENT_ID_RE = /^C\.[0-9a-f]{16}$/;
 +export const VELOCIRAPTOR_DEFAULT_ARTIFACT = 'Generic.Client.Info';
 +
@@ -309,6 +360,44 @@ index 0000000..436c28c
 +export const validVelociraptorClientId = (value: string): boolean =>
 +	VELOCIRAPTOR_CLIENT_ID_RE.test(value.trim());
 +
++export type VelociraptorResolvedClient = {
++	clientId: string;
++	platform: VelociraptorPlatformId;
++	hostname: string;
++	fqdn: string;
++};
++
++export const velociraptorResolveClientUrl = (
++	endpoint: string,
++	hostname: string,
++	origin: string
++): string => {
++	const url = new URL(endpoint, origin);
++	url.searchParams.set('hostname', hostname);
++	return url.toString();
++};
++
++/** Validate the read-only server resolver response before filling the dialog. */
++export const parseVelociraptorResolvedClient = (value: unknown): VelociraptorResolvedClient => {
++	if (!isRecord(value) || value.ok !== true) {
++		throw new Error('TicketBridge returned an invalid client resolution');
++	}
++	const clientId = typeof value.client_id === 'string' ? value.client_id.trim() : '';
++	const platform = String(value.platform ?? '');
++	if (
++		!validVelociraptorClientId(clientId) ||
++		!['linux', 'darwin', 'windows'].includes(platform)
++	) {
++		throw new Error('TicketBridge returned an invalid resolved client');
++	}
++	return {
++		clientId,
++		platform: platform as VelociraptorPlatformId,
++		hostname: typeof value.hostname === 'string' ? value.hostname : '',
++		fqdn: typeof value.fqdn === 'string' ? value.fqdn : ''
++	};
++};
++
 +/** Store the typed representation used by IRIS; preserve all other values. */
 +export const withVelociraptorClientId = (
 +	attributes: AssetCustomAttributes,
@@ -327,6 +416,260 @@ index 0000000..436c28c
 +		}
 +	};
 +};
+diff --git a/src/routes/(app)/alerts/+page.svelte b/src/routes/(app)/alerts/+page.svelte
+index 1272eef..0a7163d 100644
+--- a/src/routes/(app)/alerts/+page.svelte
++++ b/src/routes/(app)/alerts/+page.svelte
+@@ -85,6 +85,7 @@
+ 	import AlertsCloseDialog from './components/alerts-close-dialog.svelte';
+ 	import AlertEditDialog from './components/alert-edit-dialog.svelte';
+ 	import AlertCreateDialog from './components/alert-create-dialog.svelte';
++	import VelociraptorCollectDialog from '../case/[case_id]/components/VelociraptorCollectDialog.svelte';
+ 	import AlertsMergeDialog, {
+ 		type MergeAlertPayload,
+ 		type MergeMode
+@@ -379,6 +380,8 @@
+ 	// case, "Merge" folds the alerts into an existing one.
+ 	let mergeMode = $state<MergeMode>('new');
+ 	let showClose = $state(false);
++	let showVelociraptor = $state(false);
++	let velociraptorAlert = $state<Alert | null>(null);
+ 
+ 	const perPageOptions = [5, 10, 25, 50, 100, 200, 500].map((n) => ({
+ 		value: String(n),
+@@ -1714,6 +1717,7 @@
+ 					!showAlertEdit &&
+ 					!showAlertHistory &&
+ 					!showConfirmDelete &&
++					!showVelociraptor &&
+ 					!reassignOpen}
+ 				onToggleSort={toggleSort}
+ 				onSelect={(alert_id, checked) => {
+@@ -1745,6 +1749,10 @@
+ 					selected = { ...selected, [alert.alert_id]: true };
+ 					showClose = true;
+ 				}}
++				onShowVelociraptor={(alert) => {
++					velociraptorAlert = alert;
++					showVelociraptor = true;
++				}}
+ 				onSetStatus={async (alert, alert_status_id) => {
+ 					// Writes straight to the one alert rather than going through
+ 					// `setStatus`, which works off the selection and clears it
+@@ -1912,6 +1920,10 @@
+ 											mergeMode = 'new';
+ 											showMerge = true;
+ 										}}
++										onShowVelociraptor={() => {
++											velociraptorAlert = alert;
++											showVelociraptor = true;
++										}}
+ 										onShowClose={(withNote: boolean) => {
+ 											selected = { ...selected, [alert.alert_id]: true };
+ 
+@@ -1979,6 +1991,20 @@
+ 	/>
+ {/if}
+ 
++{#if velociraptorAlert}
++	<VelociraptorCollectDialog
++		bind:open={showVelociraptor}
++		alertId={velociraptorAlert.alert_id}
++		onCollected={async () => {
++			const updated = await alerts.get(velociraptorAlert!.alert_id);
++			if (updated) {
++				velociraptorAlert = updated;
++				applyUpdatedAlert(updated);
++			}
++		}}
++	/>
++{/if}
++
+ <!--
+ 	Outside the `selectedAlert` block on purpose: creating an alert is
+ 	the one alert action that does not need one to already exist.
+diff --git a/src/routes/(app)/alerts/[alert_id]/+page.svelte b/src/routes/(app)/alerts/[alert_id]/+page.svelte
+index 7b3f0f0..3393c49 100644
+--- a/src/routes/(app)/alerts/[alert_id]/+page.svelte
++++ b/src/routes/(app)/alerts/[alert_id]/+page.svelte
+@@ -19,6 +19,7 @@
+ 	import ConfirmationDialog from '$lib/components/ui/dialog/ConfirmationDialog.svelte';
+ 	import { toast } from '$lib/components/ui/toast';
+ 	import { AlertCard } from '../components/AlertCard';
++	import VelociraptorCollectDialog from '../../case/[case_id]/components/VelociraptorCollectDialog.svelte';
+ 	import { AiSuggestionsPanel } from '$lib/components/ai-suggestions';
+ 	import AlertsReasignDialog from '../components/alerts-reasign-dialog.svelte';
+ 	import AlertsCloseDialog from '../components/alerts-close-dialog.svelte';
+@@ -53,6 +54,7 @@
+ 	let showAlertEdit = $state(false);
+ 	let showAlertMerge = $state(false);
+ 	let showAlertClose = $state(false);
++	let showVelociraptor = $state(false);
+ 
+ 	let alert_id = $derived(Number(page.params.alert_id));
+ 	let alert = $derived(alerts.byId[alert_id]);
+@@ -218,6 +220,7 @@
+ 						label: alert.alert_title ?? `Alert #${alert.alert_id}`
+ 					})}
+ 				onShowMerge={() => (showAlertMerge = true)}
++				onShowVelociraptor={() => (showVelociraptor = true)}
+ 				onShowClose={(withNote) => {
+ 					if (withNote) {
+ 						showAlertClose = true;
+@@ -236,6 +239,12 @@
+ </div>
+ 
+ {#if alert}
++	<VelociraptorCollectDialog
++		bind:open={showVelociraptor}
++		alertId={alert.alert_id}
++		onCollected={refreshAlert}
++	/>
++
+ 	<AlertHistoryDialog bind:open={showAlertHistory} onClose={() => {}} {alert} />
+ 
+ 	<AlertsMergeDialog
+diff --git a/src/routes/(app)/alerts/components/AlertCard/AlertCard.svelte b/src/routes/(app)/alerts/components/AlertCard/AlertCard.svelte
+index 71257f0..f822a5f 100644
+--- a/src/routes/(app)/alerts/components/AlertCard/AlertCard.svelte
++++ b/src/routes/(app)/alerts/components/AlertCard/AlertCard.svelte
+@@ -9,6 +9,7 @@
+ 		FlameIcon,
+ 		ForwardIcon,
+ 		HandIcon,
++		HardDriveUploadIcon,
+ 		HistoryIcon,
+ 		MessagesSquareIcon,
+ 		PencilIcon,
+@@ -60,6 +61,7 @@
+ 		onUnlinkCase,
+ 		onDelete,
+ 		onShowInvestigationFlow,
++		onShowVelociraptor,
+ 		showSuggestionsChip = false
+ 	}: {
+ 		alert: Alert;
+@@ -83,6 +85,8 @@
+ 		// other AlertCard call sites (which don't know about flows) don't
+ 		// need to be touched.
+ 		onShowInvestigationFlow?: () => void;
++		// Optional so alert cards outside the detail views stay unchanged.
++		onShowVelociraptor?: () => void;
+ 		// The alert's own page: its resolved AI suggestions fold into a
+ 		// header chip rather than a strip under the card.
+ 		showSuggestionsChip?: boolean;
+@@ -415,6 +419,13 @@
+ 
+ 							<Separator />
+ 
++							{#if onShowVelociraptor}
++								<DropdownMenuItem onclick={onShowVelociraptor}>
++									<HardDriveUploadIcon /> Collect with Velociraptor
++								</DropdownMenuItem>
++								<Separator />
++							{/if}
++
+ 							<DropdownMenuItem onclick={onShowHistory}><HistoryIcon /> History</DropdownMenuItem>
+ 
+ 							{#if canTriggerHooks}
+diff --git a/src/routes/(app)/alerts/components/AlertsSplitView/AlertsSplitView.svelte b/src/routes/(app)/alerts/components/AlertsSplitView/AlertsSplitView.svelte
+index 7e7ea04..b094032 100644
+--- a/src/routes/(app)/alerts/components/AlertsSplitView/AlertsSplitView.svelte
++++ b/src/routes/(app)/alerts/components/AlertsSplitView/AlertsSplitView.svelte
+@@ -17,7 +17,7 @@
+ 	 */
+ 	import { getContext, onDestroy, onMount } from 'svelte';
+ 	import { page as appPage } from '$app/state';
+-	import { Check, Copy, EllipsisIcon, LinkIcon, PencilIcon } from 'lucide-svelte';
++	import { Check, Copy, EllipsisIcon, HardDriveUploadIcon, LinkIcon, PencilIcon } from 'lucide-svelte';
+ 	import type { Alert } from '$lib/types/resources/alert';
+ 	import { AiSuggestionsChip, AiSuggestionsPanel } from '$lib/components/ai-suggestions';
+ 	import type { AlertCluster } from '$lib/types/resources/alert-cluster';
+@@ -171,6 +171,8 @@
+ 		 * dialog is the page's, the same one the list view opens.
+ 		 */
+ 		onDelete?: (alert: Alert) => void;
++		/** Opens the page-owned Velociraptor dialog for this exact alert. */
++		onShowVelociraptor?: (alert: Alert) => void;
+ 		/**
+ 		 * Fired after the Comments tab wrote something, so the page can
+ 		 * refresh the alert and keep the tab's count honest.
+@@ -220,6 +222,7 @@
+ 		onSetStatus,
+ 		onEdit,
+ 		onDelete,
++		onShowVelociraptor,
+ 		onCommentsChanged,
+ 		onOpenCluster,
+ 		onPageChange,
+@@ -1477,6 +1480,20 @@
+ 											onMerge(f);
+ 										}}>Merge…</button
+ 									>
++									{#if onShowVelociraptor}
++										<button
++											type="button"
++											class="menu-item"
++											role="menuitem"
++											onclick={() => {
++												showMoreMenu = false;
++												onShowVelociraptor(f);
++											}}
++										>
++											<HardDriveUploadIcon size="14" aria-hidden="true" />
++											Collect with Velociraptor
++										</button>
++									{/if}
+ 									<button
+ 										type="button"
+ 										class="menu-item"
+diff --git a/src/routes/(app)/alerts/components/alert-detail-dialog.svelte b/src/routes/(app)/alerts/components/alert-detail-dialog.svelte
+index 253898b..2f2432d 100644
+--- a/src/routes/(app)/alerts/components/alert-detail-dialog.svelte
++++ b/src/routes/(app)/alerts/components/alert-detail-dialog.svelte
+@@ -36,6 +36,7 @@
+ 	import { Skeleton } from '$lib/components/ui/skeleton';
+ 	import { toast } from '$lib/components/ui/toast';
+ 	import { AlertCard } from './AlertCard';
++	import VelociraptorCollectDialog from '../../case/[case_id]/components/VelociraptorCollectDialog.svelte';
+ 	import AlertEditDialog from './alert-edit-dialog.svelte';
+ 	import AlertHistoryDialog from './alert-history-dialog.svelte';
+ 	import AlertsCloseDialog from './alerts-close-dialog.svelte';
+@@ -74,6 +75,7 @@
+ 	let showHistory = $state(false);
+ 	let showMerge = $state(false);
+ 	let showClose = $state(false);
++	let showVelociraptor = $state(false);
+ 	let showConfirmDelete = $state(false);
+ 
+ 	// Guards against a slow fetch for an alert the analyst has already
+@@ -303,6 +305,7 @@
+ 					onShowHistory={() => (showHistory = true)}
+ 					onShowComments={() => openComments(current)}
+ 					onShowMerge={() => (showMerge = true)}
++					onShowVelociraptor={() => (showVelociraptor = true)}
+ 					onShowClose={(withNote) => {
+ 						if (withNote) {
+ 							showClose = true;
+@@ -326,6 +329,18 @@
+ -->
+ {#if alert}
+ 	{@const current = alert}
++	<VelociraptorCollectDialog
++		bind:open={showVelociraptor}
++		alertId={current.alert_id}
++		onCollected={async () => {
++			const fresh = await alerts.get(current.alert_id);
++			if (fresh) {
++				alert = fresh;
++				onUpdated?.(fresh);
++			}
++		}}
++	/>
++
+ 	<AlertHistoryDialog bind:open={showHistory} onClose={() => {}} alert={current} />
+ 
+ 	<AlertEditDialog
 diff --git a/src/routes/(app)/case/[case_id]/+layout.svelte b/src/routes/(app)/case/[case_id]/+layout.svelte
 index f232f20..b89bf0b 100644
 --- a/src/routes/(app)/case/[case_id]/+layout.svelte
@@ -379,10 +722,10 @@ index f232f20..b89bf0b 100644
 +<VelociraptorCollectDialog bind:open={showVelociraptor} caseId={Number(page.params.case_id)} />
 diff --git a/src/routes/(app)/case/[case_id]/components/VelociraptorCollectDialog.svelte b/src/routes/(app)/case/[case_id]/components/VelociraptorCollectDialog.svelte
 new file mode 100644
-index 0000000..66777e5
+index 0000000..f217a88
 --- /dev/null
 +++ b/src/routes/(app)/case/[case_id]/components/VelociraptorCollectDialog.svelte
-@@ -0,0 +1,635 @@
+@@ -0,0 +1,893 @@
 +<script lang="ts">
 +	import { getContext, untrack } from 'svelte';
 +	import {
@@ -399,6 +742,7 @@ index 0000000..66777e5
 +	import { Label } from '$lib/components/ui/label';
 +	import { toast } from '$lib/components/ui/toast';
 +	import { CaseAssetsService } from '$lib/services/case-assets.service';
++	import { AlertService } from '$lib/services/alerts.service';
 +	import type { Asset } from '$lib/types/resources/asset';
 +	import {
 +		CASE_ASSETS_CTX,
@@ -411,10 +755,12 @@ index 0000000..66777e5
 +	import {
 +		defaultVelociraptorArtifacts,
 +		parseVelociraptorCatalog,
++		parseVelociraptorResolvedClient,
 +		recommendedVelociraptorArtifacts,
 +		validVelociraptorClientId,
 +		validVelociraptorSelection,
 +		velociraptorClientId,
++		velociraptorResolveClientUrl,
 +		velociraptorPlatform,
 +		withVelociraptorClientId,
 +		type VelociraptorCatalog,
@@ -423,7 +769,9 @@ index 0000000..66777e5
 +
 +	type Props = {
 +		open: boolean;
-+		caseId: number;
++		caseId?: number;
++		alertId?: number;
++		onCollected?: (caseId: number) => void;
 +	};
 +
 +	type CollectionFlow = {
@@ -448,15 +796,39 @@ index 0000000..66777e5
 +		errors: CollectionError[];
 +		evidence_id: number | string;
 +		sha256: string;
++		case_id: number;
++		case_created?: boolean;
 +		asset_id?: number | null;
 +	};
 +
-+	let { open = $bindable(), caseId }: Props = $props();
++	type CollectionJob = {
++		job_id: string;
++		status:
++			| 'queued'
++			| 'collecting'
++			| 'uploading'
++			| 'completed'
++			| 'partial'
++			| 'failed'
++			| 'evidence_error'
++			| 'error';
++		case_id: number | null;
++		error: string | null;
++		result: CollectionResult | null;
++	};
 +
-+	const caseAssets = getContext<CaseAssetsContext>(CASE_ASSETS_CTX);
-+	const caseEvidences = getContext<CaseEvidencesContext>(CASE_EVIDENCES_CTX);
-+	const endpoint = '__TB_URL__/velociraptor/collect?key=__TB_KEY__';
++	let { open = $bindable(), caseId, alertId, onCollected }: Props = $props();
++
++	const caseAssets = getContext<CaseAssetsContext | undefined>(CASE_ASSETS_CTX);
++	const caseEvidences = getContext<CaseEvidencesContext | undefined>(CASE_EVIDENCES_CTX);
++	const endpoint =
++		alertId !== undefined
++			? '__TB_URL__/velociraptor/alert-collect?key=__TB_KEY__'
++			: '__TB_URL__/velociraptor/collect?key=__TB_KEY__';
 +	const catalogEndpoint = '__TB_URL__/velociraptor/catalog?key=__TB_KEY__';
++	const resolveClientEndpoint = '__TB_URL__/velociraptor/resolve-client?key=__TB_KEY__';
++	const jobsEndpoint = '__TB_URL__/velociraptor/jobs?key=__TB_KEY__';
++	const jobEndpoint = (jobId: string) => `__TB_URL__/velociraptor/jobs/${jobId}?key=__TB_KEY__`;
 +
 +	let assets = $state<Asset[]>([]);
 +	let catalog = $state<VelociraptorCatalog | null>(null);
@@ -465,11 +837,18 @@ index 0000000..66777e5
 +	let selectedArtifacts = $state<string[]>([]);
 +	let artifactSearch = $state('');
 +	let clientId = $state('');
++	let clientIdSource = $state<'asset' | 'velociraptor' | 'manual' | ''>('');
++	let resolving = $state(false);
 +	let confirmed = $state(false);
 +	let busy = $state<'load' | 'save' | 'collect' | null>(null);
 +	let error = $state('');
 +	let result = $state<CollectionResult | null>(null);
++	let jobStatus = $state<CollectionJob['status'] | ''>('');
++	let activeJobId = $state('');
++	let resolvedCaseId = $state<number | null>(caseId ?? null);
 +	let loadSequence = 0;
++	let resolveSequence = 0;
++	let pollSequence = 0;
 +
 +	const selectedAsset = $derived(
 +		assets.find((asset) => String(asset.asset_id) === selectedAssetId) ?? null
@@ -511,11 +890,47 @@ index 0000000..66777e5
 +		resetConfirmation();
 +	};
 +
++	const resolveClientForAsset = async (asset: Asset, sequence: number) => {
++		resolving = true;
++		error = '';
++		try {
++			const url = velociraptorResolveClientUrl(
++				resolveClientEndpoint,
++				asset.asset_name,
++				window.location.origin
++			);
++			const response = await fetch(url, { headers: { Accept: 'application/json' } });
++			const raw = (await response.json().catch(() => null)) as unknown;
++			if (!response.ok) {
++				const message =
++					typeof raw === 'object' && raw !== null && 'error' in raw && typeof raw.error === 'string'
++						? raw.error
++						: `Client resolver returned HTTP ${response.status}`;
++				throw new Error(message);
++			}
++			const resolved = parseVelociraptorResolvedClient(raw);
++			if (sequence !== resolveSequence || selectedAssetId !== String(asset.asset_id)) return;
++			selectPlatform(resolved.platform);
++			clientId = resolved.clientId;
++			clientIdSource = 'velociraptor';
++		} catch (cause) {
++			if (sequence === resolveSequence) {
++				error = `Automatic Client ID lookup failed: ${cause instanceof Error ? cause.message : 'unknown resolver error'}`;
++			}
++		} finally {
++			if (sequence === resolveSequence) resolving = false;
++		}
++	};
++
 +	const selectAsset = (assetId: number | string) => {
 +		selectedAssetId = String(assetId);
++		const sequence = ++resolveSequence;
++		resolving = false;
 +		const asset = assets.find((item) => String(item.asset_id) === selectedAssetId) ?? null;
 +		clientId = asset ? velociraptorClientId(asset.custom_attributes) : '';
++		clientIdSource = validVelociraptorClientId(clientId) ? 'asset' : '';
 +		selectPlatform(platformForAsset(asset));
++		if (asset && clientIdSource !== 'asset') void resolveClientForAsset(asset, sequence);
 +	};
 +
 +	const toggleArtifact = (artifact: string, checked: boolean) => {
@@ -544,32 +959,155 @@ index 0000000..66777e5
 +		resetConfirmation();
 +	};
 +
++	const parseJob = (payload: unknown): CollectionJob | null => {
++		if (typeof payload !== 'object' || payload === null || !('job' in payload)) {
++			throw new Error('TicketBridge returned an invalid collection job response');
++		}
++		const job = payload.job as CollectionJob | null;
++		if (job === null) return null;
++		if (!job || !/^[0-9a-f]{32}$/.test(job.job_id) || !job.status) {
++			throw new Error('TicketBridge returned an invalid collection job');
++		}
++		return job;
++	};
++
++	const finishJob = (job: CollectionJob, notify: boolean) => {
++		if (job.case_id && job.case_id > 0) resolvedCaseId = job.case_id;
++		if (job.status === 'error' || job.status === 'evidence_error') {
++			throw new Error(job.error || `Collection finished with status ${job.status}`);
++		}
++		const completed = job.result;
++		if (
++			!completed ||
++			completed.status !== job.status ||
++			!completed.sha256 ||
++			!completed.evidence_id ||
++			!(completed.case_id > 0) ||
++			!Array.isArray(completed.requested_artifacts) ||
++			!Array.isArray(completed.artifacts) ||
++			!Array.isArray(completed.errors) ||
++			completed.artifacts.some(
++				(flow) =>
++					!completed.requested_artifacts.includes(flow.artifact) || !flow.flow_id || !flow.flow_link
++			)
++		) {
++			throw new Error('TicketBridge returned an incomplete collection result');
++		}
++		result = completed;
++		resolvedCaseId = completed.case_id;
++		confirmed = false;
++		busy = null;
++		activeJobId = '';
++		if (notify) {
++			toast({
++				title:
++					completed.status === 'completed'
++						? 'Velociraptor collection finished'
++						: 'Collection finished with errors',
++				description: `Incident #${completed.case_id}, Evidence #${completed.evidence_id}; ${completed.artifacts.length} succeeded, ${completed.errors.length} failed`,
++				variant: completed.status === 'failed' ? 'destructive' : 'success'
++			});
++			onCollected?.(completed.case_id);
++			if (caseEvidences) void caseEvidences.refresh();
++		}
++	};
++
++	const pollJob = async (jobId: string) => {
++		const sequence = ++pollSequence;
++		activeJobId = jobId;
++		busy = 'collect';
++		try {
++			while (sequence === pollSequence) {
++				const response = await fetch(jobEndpoint(jobId), {
++					headers: { Accept: 'application/json' }
++				});
++				const payload = (await response.json().catch(() => null)) as unknown;
++				if (sequence !== pollSequence) return;
++				if (!response.ok) throw new Error(`Collection status returned HTTP ${response.status}`);
++				const job = parseJob(payload);
++				if (!job) throw new Error('Collection job disappeared');
++				jobStatus = job.status;
++				if (job.case_id && job.case_id > 0) resolvedCaseId = job.case_id;
++				if (['queued', 'collecting', 'uploading'].includes(job.status)) {
++					await new Promise((resolve) => setTimeout(resolve, 1500));
++					continue;
++				}
++				finishJob(job, true);
++				return;
++			}
++		} catch (cause) {
++			if (sequence === pollSequence) {
++				error = cause instanceof Error ? cause.message : 'Velociraptor collection failed';
++				busy = null;
++				activeJobId = '';
++			}
++		}
++	};
++
++	const loadLatestJob = async (sequence: number) => {
++		const selector = alertId !== undefined ? `alert_id=${alertId}` : `case_id=${caseId}`;
++		const response = await fetch(`${jobsEndpoint}&${selector}`, {
++			headers: { Accept: 'application/json' }
++		});
++		const payload = (await response.json().catch(() => null)) as unknown;
++		if (sequence !== loadSequence) return;
++		if (!response.ok) throw new Error(`Collection history returned HTTP ${response.status}`);
++		const job = parseJob(payload);
++		if (!job) return;
++		jobStatus = job.status;
++		if (['queued', 'collecting', 'uploading'].includes(job.status)) {
++			void pollJob(job.job_id);
++		} else if (job.status === 'error' || job.status === 'evidence_error') {
++			if (job.case_id && job.case_id > 0) resolvedCaseId = job.case_id;
++			error = job.error || `Previous collection finished with status ${job.status}`;
++		} else {
++			finishJob(job, false);
++		}
++	};
++
 +	const loadAssets = async () => {
 +		const sequence = ++loadSequence;
++		resolveSequence += 1;
++		resolving = false;
++		clientIdSource = '';
 +		busy = 'load';
 +		error = '';
 +		result = null;
++		resolvedCaseId = caseId ?? null;
 +		confirmed = false;
 +		try {
-+			const [response, catalogResponse] = await Promise.all([
-+				CaseAssetsService.list(caseId, {
-+					page: 1,
-+					per_page: 1000,
-+					order_by: 'asset_id',
-+					sort_dir: 'asc'
-+				}),
-+				fetch(catalogEndpoint, { headers: { Accept: 'application/json' } })
-+			]);
++			const catalogResponse = await fetch(catalogEndpoint, {
++				headers: { Accept: 'application/json' }
++			});
 +			const rawCatalog = (await catalogResponse.json().catch(() => null)) as unknown;
 +			if (!catalogResponse.ok)
 +				throw new Error(`Artifact catalog returned HTTP ${catalogResponse.status}`);
 +			const parsedCatalog = parseVelociraptorCatalog(rawCatalog);
-+			if (sequence !== loadSequence) return;
-+			if (!response.ok || response.error || !response.data || typeof response.data === 'string') {
-+				throw new Error(response.error?.message ?? 'Failed to load case assets');
++			let loadedAssets: Asset[];
++			if (alertId !== undefined) {
++				const response = await AlertService.get(alertId);
++				if (!response.ok || response.error || !response.data || typeof response.data === 'string') {
++					throw new Error(response.error?.message ?? 'Failed to load alert assets');
++				}
++				loadedAssets = response.data.assets ?? [];
++				resolvedCaseId = response.data.cases?.[0] ?? null;
++			} else if (caseId !== undefined) {
++				const response = await CaseAssetsService.list(caseId, {
++					page: 1,
++					per_page: 1000,
++					order_by: 'asset_id',
++					sort_dir: 'asc'
++				});
++				if (!response.ok || response.error || !response.data || typeof response.data === 'string') {
++					throw new Error(response.error?.message ?? 'Failed to load case assets');
++				}
++				loadedAssets = response.data.data;
++			} else {
++				throw new Error('A case or alert must be selected');
 +			}
++			if (sequence !== loadSequence) return;
 +			catalog = parsedCatalog;
-+			assets = response.data.data;
++			assets = loadedAssets;
 +			const preferred =
 +				assets.find((asset) =>
 +					validVelociraptorClientId(velociraptorClientId(asset.custom_attributes))
@@ -580,12 +1118,13 @@ index 0000000..66777e5
 +				clientId = '';
 +				selectPlatform('linux');
 +			}
++			await loadLatestJob(sequence);
 +		} catch (cause) {
 +			if (sequence === loadSequence) {
 +				error = cause instanceof Error ? cause.message : 'Failed to load collection options';
 +			}
 +		} finally {
-+			if (sequence === loadSequence) busy = null;
++			if (sequence === loadSequence && busy === 'load') busy = null;
 +		}
 +	};
 +
@@ -605,16 +1144,18 @@ index 0000000..66777e5
 +		busy = 'save';
 +		error = '';
 +		try {
++			if (caseId === undefined) throw new Error('Client ID can be saved from a case asset');
 +			const response = await CaseAssetsService.update(caseId, selectedAsset.asset_id, {
 +				custom_attributes: customAttributes
 +			});
 +			if (!response.ok || response.error || !response.data || typeof response.data === 'string') {
-+				throw new Error(response.error?.message ?? 'Failed to update the case asset');
++				throw new Error(response.error?.message ?? 'Failed to update the asset');
 +			}
 +			const updated = response.data;
 +			assets = assets.map((asset) => (asset.asset_id === updated.asset_id ? updated : asset));
-+			caseAssets.byId[updated.asset_id] = updated;
++			if (caseAssets) caseAssets.byId[updated.asset_id] = updated;
 +			clientId = velociraptorClientId(updated.custom_attributes) || clientId.trim();
++			clientIdSource = 'asset';
 +			toast({
 +				title: 'Velociraptor Client ID saved',
 +				description: `Asset: ${updated.asset_name}`,
@@ -648,15 +1189,19 @@ index 0000000..66777e5
 +		busy = 'collect';
 +		error = '';
 +		result = null;
++		jobStatus = 'queued';
 +		try {
 +			const body = new URLSearchParams({
-+				case_id: String(caseId),
 +				asset_id: String(selectedAsset.asset_id),
 +				client_id: clientId.trim(),
 +				platform: selectedPlatform,
 +				confirm: 'yes',
-+				response: 'json'
++				response: 'json',
++				async: '1'
 +			});
++			if (alertId !== undefined) body.set('alert_id', String(alertId));
++			else if (caseId !== undefined) body.set('case_id', String(caseId));
++			else throw new Error('A case or alert must be selected');
 +			for (const artifact of selectedArtifacts) body.append('artifacts', artifact);
 +			const response = await fetch(endpoint, {
 +				method: 'POST',
@@ -666,40 +1211,23 @@ index 0000000..66777e5
 +				},
 +				body
 +			});
-+			const payload = (await response.json().catch(() => null)) as
-+				| (CollectionResult & { ok?: boolean; error?: string })
-+				| null;
++			const payload = (await response.json().catch(() => null)) as {
++				ok?: boolean;
++				error?: string;
++				job?: CollectionJob;
++			} | null;
 +			if (!response.ok || !payload?.ok) {
 +				throw new Error(payload?.error ?? `TicketBridge returned HTTP ${response.status}`);
 +			}
-+			if (
-+				!payload.sha256 ||
-+				!payload.evidence_id ||
-+				payload.platform !== selectedPlatform ||
-+				!Array.isArray(payload.artifacts) ||
-+				!Array.isArray(payload.errors) ||
-+				JSON.stringify(payload.requested_artifacts) !== JSON.stringify(selectedArtifacts) ||
-+				payload.artifacts.some(
-+					(flow) => !selectedArtifacts.includes(flow.artifact) || !flow.flow_id || !flow.flow_link
-+				)
-+			) {
-+				throw new Error('TicketBridge returned an incomplete or mismatched collection result');
-+			}
-+			result = payload;
++			const job = parseJob(payload);
++			if (!job) throw new Error('TicketBridge did not return a collection job');
++			if (job.case_id && job.case_id > 0) resolvedCaseId = job.case_id;
 +			confirmed = false;
-+			toast({
-+				title:
-+					payload.status === 'completed'
-+						? 'Velociraptor collection finished'
-+						: 'Collection finished with errors',
-+				description: `Evidence #${payload.evidence_id}; ${payload.artifacts.length} succeeded, ${payload.errors.length} failed`,
-+				variant: payload.status === 'failed' ? 'destructive' : 'success'
-+			});
-+			void caseEvidences.refresh();
++			await pollJob(job.job_id);
 +		} catch (cause) {
 +			error = cause instanceof Error ? cause.message : 'Velociraptor collection failed';
-+		} finally {
 +			busy = null;
++			activeJobId = '';
 +		}
 +	};
 +
@@ -710,9 +1238,14 @@ index 0000000..66777e5
 +				if (busy === null) void loadAssets();
 +			} else {
 +				loadSequence += 1;
++				resolveSequence += 1;
++				pollSequence += 1;
++				resolving = false;
 +				confirmed = false;
 +				error = '';
-+				if (busy === 'load') busy = null;
++				jobStatus = '';
++				activeJobId = '';
++				if (busy === 'load' || busy === 'collect') busy = null;
 +				if (busy === null) result = null;
 +			}
 +		});
@@ -726,8 +1259,10 @@ index 0000000..66777e5
 +				<HardDriveUploadIcon class="size-4" /> Collect with Velociraptor
 +			</Dialog.Title>
 +			<Dialog.Description>
-+				Choose an operating system and one or more reviewed artifacts. Separate Flows are packaged
-+				into one verified Evidence ZIP.
++				Choose an operating system and one or more reviewed artifacts. Separate Flows run in the
++				background and are packaged into one verified Evidence ZIP.{alertId !== undefined
++					? ' A linked incident is reused or created automatically.'
++					: ''}
 +			</Dialog.Description>
 +		</Dialog.Header>
 +
@@ -738,13 +1273,13 @@ index 0000000..66777e5
 +				</div>
 +			{:else if assets.length === 0}
 +				<div class="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
-+					Add a host to the case assets first. Its Velociraptor Client ID can then be stored in
-+					custom attributes.
++					Add a host to the {alertId !== undefined ? 'alert' : 'case'} assets first. Its Velociraptor
++					Client ID can then be stored in custom attributes.
 +				</div>
 +			{:else if catalog}
 +				<div class="grid gap-4 sm:grid-cols-2">
 +					<div class="space-y-2">
-+						<Label for="velociraptor-asset">Case asset</Label>
++						<Label for="velociraptor-asset">{alertId !== undefined ? 'Alert' : 'Case'} asset</Label>
 +						<select
 +							id="velociraptor-asset"
 +							class="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
@@ -867,20 +1402,22 @@ index 0000000..66777e5
 +				<div class="space-y-2">
 +					<div class="flex items-center justify-between gap-3">
 +						<Label for="velociraptor-client-id">Velociraptor Client ID</Label>
-+						<Button
-+							type="button"
-+							variant="ghost"
-+							size="sm"
-+							disabled={busy !== null || !validClientId}
-+							onclick={saveClientId}
-+							data-testid="velociraptor-save-client-id"
-+						>
-+							{#if busy === 'save'}
-+								<Loader2Icon class="size-4 animate-spin" /> Saving…
-+							{:else}
-+								<SaveIcon class="size-4" /> Save to asset
-+							{/if}
-+						</Button>
++						{#if alertId === undefined}
++							<Button
++								type="button"
++								variant="ghost"
++								size="sm"
++								disabled={busy !== null || resolving || !validClientId}
++								onclick={saveClientId}
++								data-testid="velociraptor-save-client-id"
++							>
++								{#if busy === 'save'}
++									<Loader2Icon class="size-4 animate-spin" /> Saving…
++								{:else}
++									<SaveIcon class="size-4" /> Save to asset
++								{/if}
++							</Button>
++						{/if}
 +					</div>
 +					<Input
 +						id="velociraptor-client-id"
@@ -891,15 +1428,35 @@ index 0000000..66777e5
 +						disabled={busy !== null}
 +						class={clientId && !validClientId ? 'border-destructive font-mono' : 'font-mono'}
 +						oninput={(event) => {
++							resolveSequence += 1;
++							resolving = false;
 +							clientId = event.currentTarget.value;
++							clientIdSource = 'manual';
 +							resetConfirmation();
 +						}}
 +						data-testid="velociraptor-client-id"
 +					/>
-+					<p class="text-xs text-muted-foreground">
-+						Stored as custom attributes → velociraptor → client_id. You can override it for this
-+						collection or save it separately to the selected asset.
-+					</p>
++					{#if resolving}
++						<p class="flex items-center gap-2 text-xs text-muted-foreground">
++							<Loader2Icon class="size-3 animate-spin" /> Finding one unique normalized hostname/FQDN
++							match in Velociraptor…
++						</p>
++					{:else if clientIdSource === 'velociraptor'}
++						<p class="text-xs text-muted-foreground">
++							Found automatically by an unique normalized hostname/FQDN match. Verify the client
++							before collection{alertId === undefined
++								? '; use Save to asset to persist it.'
++								: '; alert assets are read-only here.'}
++						</p>
++					{:else}
++						<p class="text-xs text-muted-foreground">
++							A saved ID is read from custom attributes → velociraptor → client_id; otherwise
++							TicketBridge finds it by hostname/FQDN. You can override it for this collection{alertId ===
++							undefined
++								? ' or save it separately to the selected asset.'
++								: '; alert assets are read-only here.'}
++						</p>
++					{/if}
 +				</div>
 +
 +				<label class="flex cursor-pointer items-start gap-3 text-sm" for="velociraptor-confirm">
@@ -908,7 +1465,11 @@ index 0000000..66777e5
 +						type="checkbox"
 +						class="mt-1 size-4"
 +						checked={confirmed}
-+						disabled={busy !== null || !selectedAsset || !validClientId || !validSelection}
++						disabled={busy !== null ||
++							resolving ||
++							!selectedAsset ||
++							!validClientId ||
++							!validSelection}
 +						onchange={(event) => {
 +							confirmed = event.currentTarget.checked;
 +							error = '';
@@ -922,12 +1483,38 @@ index 0000000..66777e5
 +				</label>
 +			{/if}
 +
++			{#if busy === 'collect' && !result}
++				<div
++					class="space-y-2 rounded-md border border-primary/30 bg-primary/5 p-4 text-sm"
++					data-testid="velociraptor-job-status"
++				>
++					<p class="flex items-center gap-2 font-medium">
++						<Loader2Icon class="size-4 animate-spin" />
++						{jobStatus === 'queued'
++							? 'Collection is waiting for a worker…'
++							: jobStatus === 'uploading'
++								? 'Collection finished; uploading and verifying Evidence…'
++								: 'Velociraptor collection is running…'}
++					</p>
++					<p class="text-xs text-muted-foreground">
++						You can close this window. The job will continue on the server and its status will be
++						restored here.
++					</p>
++					{#if activeJobId}<p class="font-mono text-xs">Job ID: {activeJobId}</p>{/if}
++				</div>
++			{/if}
++
 +			{#if error}
 +				<div
-+					class="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm"
++					class="space-y-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm"
 +					role="alert"
 +				>
-+					{error}
++					<p>{error}</p>
++					{#if resolvedCaseId}
++						<Button variant="outline" size="sm" href={`/case/${resolvedCaseId}/evidence`}>
++							Open incident Evidence
++						</Button>
++					{/if}
 +				</div>
 +			{/if}
 +
@@ -987,21 +1574,30 @@ index 0000000..66777e5
 +					<Button
 +						variant="outline"
 +						size="sm"
-+						href={`/case/${caseId}/evidence`}
++						href={`/case/${resolvedCaseId}/evidence`}
 +						onclick={() => (open = false)}
 +					>
 +						Open Evidence
 +					</Button>
++					<p class="text-xs text-muted-foreground" data-testid="velociraptor-download-hint">
++						To download the ZIP: Datastore → Incident files → Incident {result.case_id} → Evidences →
++						file menu → Download.
++					</p>
 +				</div>
 +			{/if}
 +		</div>
 +
 +		<Dialog.Footer class="shrink-0 border-t px-6 py-4">
-+			<Button variant="outline" disabled={busy !== null} onclick={() => (open = false)}>
-+				{result ? 'Close' : 'Cancel'}
++			<Button
++				variant="outline"
++				disabled={busy !== null && busy !== 'collect'}
++				onclick={() => (open = false)}
++			>
++				{busy === 'collect' ? 'Close; collection continues' : result ? 'Close' : 'Cancel'}
 +			</Button>
 +			<Button
 +				disabled={busy !== null ||
++					resolving ||
 +					!selectedAsset ||
 +					!validClientId ||
 +					!validSelection ||
@@ -1010,7 +1606,12 @@ index 0000000..66777e5
 +				data-testid="velociraptor-run-collection"
 +			>
 +				{#if busy === 'collect'}
-+					<Loader2Icon class="size-4 animate-spin" /> Collecting {selectedArtifacts.length} artifact(s)…
++					<Loader2Icon class="size-4 animate-spin" />
++					{jobStatus === 'uploading'
++						? 'Uploading Evidence…'
++						: jobStatus === 'queued'
++							? 'Queued…'
++							: 'Collecting…'}
 +				{:else}
 +					<HardDriveUploadIcon class="size-4" /> Run {selectedArtifacts.length || ''} collection(s)
 +				{/if}
@@ -1018,3 +1619,35 @@ index 0000000..66777e5
 +		</Dialog.Footer>
 +	</Dialog.Content>
 +</Dialog.Root>
+--- a/src/routes/(app)/case/[case_id]/components/VelociraptorCollectDialog.svelte
++++ b/src/routes/(app)/case/[case_id]/components/VelociraptorCollectDialog.svelte
+@@ -154,12 +154,17 @@
+ 		return 'linux';
+ 	};
+ 
+-	const selectPlatform = (platform: VelociraptorPlatformId) => {
++	const selectPlatform = (platform: VelociraptorPlatformId, preserveResult = false) => {
+ 		if (!catalog) return;
+ 		selectedPlatform = platform;
+ 		selectedArtifacts = defaultVelociraptorArtifacts(catalog, platform);
+ 		artifactSearch = '';
+-		resetConfirmation();
++		if (preserveResult) {
++			confirmed = false;
++			error = '';
++		} else {
++			resetConfirmation();
++		}
+ 	};
+ 
+ 	const resolveClientForAsset = async (asset: Asset, sequence: number) => {
+@@ -182,7 +187,8 @@
+ 			}
+ 			const resolved = parseVelociraptorResolvedClient(raw);
+ 			if (sequence !== resolveSequence || selectedAssetId !== String(asset.asset_id)) return;
+-			selectPlatform(resolved.platform);
++			// A slow resolver must not erase a completed job restored in parallel.
++			selectPlatform(resolved.platform, true);
+ 			clientId = resolved.clientId;
+ 			clientIdSource = 'velociraptor';
+ 		} catch (cause) {
