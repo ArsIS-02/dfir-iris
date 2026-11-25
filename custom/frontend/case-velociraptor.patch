@@ -1,3 +1,95 @@
+diff --git a/src/lib/utils/__tests__/velociraptor-jobs.test.ts b/src/lib/utils/__tests__/velociraptor-jobs.test.ts
+new file mode 100644
+index 0000000..7a90930
+--- /dev/null
++++ b/src/lib/utils/__tests__/velociraptor-jobs.test.ts
+@@ -0,0 +1,86 @@
++import { describe, expect, it } from 'vitest';
++import {
++	parseVelociraptorJobHistory,
++	safeVelociraptorHttpUrl,
++	velociraptorEvidenceHref,
++	velociraptorIncidentJobsUrl,
++	velociraptorJobIsActive,
++	velociraptorJobStatusLabel
++} from '../velociraptor-jobs';
++
++const job = (id: string, createdTs: number, kind: 'alert' | 'case' = 'alert') => ({
++	job_id: id,
++	kind,
++	target_id: kind === 'alert' ? 1431 : 90,
++	case_id: 90,
++	platform: 'linux',
++	status: 'completed',
++	created_ts: createdTs,
++	updated_ts: createdTs + 2,
++	error: '',
++	result: {
++		artifacts: [
++			{
++				artifact: 'Generic.Client.Info',
++				flow_id: 'F.TEST',
++				flow_link: 'https://velociraptor.example.test/flows/F.TEST',
++				state: 'FINISHED',
++				row_count: 22
++			}
++		],
++		evidence_id: 114,
++		filename: 'case-90-test.zip',
++		sha256: 'abc123',
++		size: 3362
++	}
++});
++
++describe('Velociraptor incident job history', () => {
++	it('parses alert and incident jobs and sorts the newest first', () => {
++		const jobs = parseVelociraptorJobHistory(
++			{ ok: true, jobs: [job('a'.repeat(32), 100, 'case'), job('b'.repeat(32), 200)] },
++			90
++		);
++		expect(jobs.map((item) => item.jobId)).toEqual(['b'.repeat(32), 'a'.repeat(32)]);
++		expect(jobs[0].flows[0]).toMatchObject({ flowId: 'F.TEST', rowCount: 22 });
++		expect(jobs[0].evidenceId).toBe(114);
++	});
++
++	it('accepts an empty history without creating a placeholder job', () => {
++		expect(parseVelociraptorJobHistory({ ok: true, jobs: [] }, 90)).toEqual([]);
++	});
++
++	it('rejects malformed, cross-incident and unsafe responses', () => {
++		expect(() => parseVelociraptorJobHistory({ ok: true }, 90)).toThrow(
++			'invalid collection history'
++		);
++		expect(() =>
++			parseVelociraptorJobHistory(
++				{ ok: true, jobs: [{ ...job('a'.repeat(32), 100), case_id: 91 }] },
++				90
++			)
++		).toThrow('another incident');
++		const unsafe = job('a'.repeat(32), 100);
++		unsafe.result.artifacts[0].flow_link = 'javascript:alert(1)';
++		expect(() => parseVelociraptorJobHistory({ ok: true, jobs: [unsafe] }, 90)).toThrow('Flow URL');
++	});
++
++	it('builds only local Evidence links and preserves the endpoint key', () => {
++		expect(velociraptorIncidentJobsUrl('/velociraptor/jobs?key=test', 90)).toBe(
++			'/velociraptor/jobs?key=test&incident_id=90'
++		);
++		expect(velociraptorEvidenceHref(90, 114)).toBe('/case/90/evidence/114');
++		expect(safeVelociraptorHttpUrl('http://velociraptor.example.test/F.TEST')).toBe(
++			'http://velociraptor.example.test/F.TEST'
++		);
++	});
++
++	it('polls only active jobs and keeps terminal status labels explicit', () => {
++		expect(velociraptorJobIsActive('queued')).toBe(true);
++		expect(velociraptorJobIsActive('collecting')).toBe(true);
++		expect(velociraptorJobIsActive('uploading')).toBe(true);
++		expect(velociraptorJobIsActive('completed')).toBe(false);
++		expect(velociraptorJobIsActive('evidence_error')).toBe(false);
++		expect(velociraptorJobStatusLabel('evidence_error')).toBe('Evidence delivery error');
++	});
++});
 diff --git a/src/lib/utils/__tests__/velociraptor.test.ts b/src/lib/utils/__tests__/velociraptor.test.ts
 new file mode 100644
 index 0000000..90e298d
@@ -200,6 +292,186 @@ index 0000000..90e298d
 +		expect(() => parseVelociraptorResolvedClient(payload)).toThrow('invalid');
 +	});
 +});
+diff --git a/src/lib/utils/velociraptor-jobs.ts b/src/lib/utils/velociraptor-jobs.ts
+new file mode 100644
+index 0000000..bc5701d
+--- /dev/null
++++ b/src/lib/utils/velociraptor-jobs.ts
+@@ -0,0 +1,174 @@
++export const VELOCIRAPTOR_ACTIVE_JOB_STATUSES = ['queued', 'collecting', 'uploading'] as const;
++
++export const VELOCIRAPTOR_JOB_STATUSES = [
++	...VELOCIRAPTOR_ACTIVE_JOB_STATUSES,
++	'completed',
++	'partial',
++	'failed',
++	'evidence_error',
++	'error'
++] as const;
++
++export type VelociraptorJobStatus = (typeof VELOCIRAPTOR_JOB_STATUSES)[number];
++
++export type VelociraptorJobFlow = {
++	artifact: string;
++	flowId: string;
++	flowLink: string;
++	state: string;
++	rowCount: number;
++};
++
++export type VelociraptorJob = {
++	jobId: string;
++	kind: 'alert' | 'case';
++	targetId: number;
++	caseId: number;
++	platform: string;
++	status: VelociraptorJobStatus;
++	createdTs: number;
++	updatedTs: number;
++	error: string;
++	flows: VelociraptorJobFlow[];
++	evidenceId: number | null;
++	filename: string;
++	sha256: string;
++	size: number | null;
++};
++
++const isRecord = (value: unknown): value is Record<string, unknown> =>
++	typeof value === 'object' && value !== null && !Array.isArray(value);
++
++const requiredString = (value: unknown): string => {
++	if (typeof value !== 'string' || !value.trim()) {
++		throw new Error('TicketBridge returned an invalid collection job');
++	}
++	return value.trim();
++};
++
++const positiveInteger = (value: unknown): number => {
++	const parsed = Number(value);
++	if (!Number.isSafeInteger(parsed) || parsed <= 0) {
++		throw new Error('TicketBridge returned an invalid collection job target');
++	}
++	return parsed;
++};
++
++const optionalPositiveInteger = (value: unknown): number | null => {
++	if (value === null || value === undefined || value === '') return null;
++	return positiveInteger(value);
++};
++
++const finiteTimestamp = (value: unknown): number => {
++	const parsed = Number(value);
++	if (!Number.isFinite(parsed) || parsed <= 0) {
++		throw new Error('TicketBridge returned an invalid collection job timestamp');
++	}
++	return parsed;
++};
++
++export const safeVelociraptorHttpUrl = (value: unknown): string => {
++	const raw = requiredString(value);
++	let parsed: URL;
++	try {
++		parsed = new URL(raw);
++	} catch {
++		throw new Error('TicketBridge returned an invalid Flow URL');
++	}
++	if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
++		throw new Error('TicketBridge returned a non-HTTP Flow URL');
++	}
++	return parsed.toString();
++};
++
++export const velociraptorIncidentJobsUrl = (endpoint: string, caseId: number): string =>
++	`${endpoint}${endpoint.includes('?') ? '&' : '?'}incident_id=${positiveInteger(caseId)}`;
++
++export const velociraptorEvidenceHref = (caseId: number, evidenceId: number): string =>
++	`/case/${positiveInteger(caseId)}/evidence/${positiveInteger(evidenceId)}`;
++
++export const velociraptorJobIsActive = (status: VelociraptorJobStatus): boolean =>
++	(VELOCIRAPTOR_ACTIVE_JOB_STATUSES as readonly string[]).includes(status);
++
++export const velociraptorJobStatusLabel = (status: VelociraptorJobStatus): string =>
++	({
++		queued: 'Queued',
++		collecting: 'Collecting',
++		uploading: 'Uploading Evidence',
++		completed: 'Completed',
++		partial: 'Partial',
++		failed: 'Failed',
++		evidence_error: 'Evidence delivery error',
++		error: 'Error'
++	})[status];
++
++export const velociraptorJobStatusClass = (status: VelociraptorJobStatus): string => {
++	if (status === 'completed')
++		return 'border-emerald-600/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400';
++	if (status === 'partial')
++		return 'border-amber-600/30 bg-amber-500/10 text-amber-700 dark:text-amber-400';
++	if (velociraptorJobIsActive(status))
++		return 'border-sky-600/30 bg-sky-500/10 text-sky-700 dark:text-sky-400';
++	return 'border-destructive/40 bg-destructive/10 text-destructive';
++};
++
++const parseFlow = (value: unknown): VelociraptorJobFlow => {
++	if (!isRecord(value)) throw new Error('TicketBridge returned an invalid Flow');
++	return {
++		artifact: requiredString(value.artifact),
++		flowId: requiredString(value.flow_id),
++		flowLink: safeVelociraptorHttpUrl(value.flow_link),
++		state: typeof value.state === 'string' ? value.state : '',
++		rowCount: Number.isFinite(Number(value.row_count)) ? Number(value.row_count) : 0
++	};
++};
++
++const parseJob = (value: unknown, expectedCaseId: number): VelociraptorJob => {
++	if (!isRecord(value)) throw new Error('TicketBridge returned an invalid collection job');
++	const jobId = requiredString(value.job_id);
++	if (!/^[0-9a-f]{32}$/.test(jobId)) throw new Error('TicketBridge returned an invalid Job ID');
++	if (value.kind !== 'alert' && value.kind !== 'case') {
++		throw new Error('TicketBridge returned an invalid collection job kind');
++	}
++	const status = requiredString(value.status) as VelociraptorJobStatus;
++	if (!(VELOCIRAPTOR_JOB_STATUSES as readonly string[]).includes(status)) {
++		throw new Error('TicketBridge returned an unknown collection job status');
++	}
++	const caseId = positiveInteger(value.case_id);
++	if (caseId !== expectedCaseId)
++		throw new Error('TicketBridge returned a job for another incident');
++	const result = isRecord(value.result) ? value.result : null;
++	const size = result?.size === null || result?.size === undefined ? null : Number(result.size);
++	if (size !== null && (!Number.isFinite(size) || size < 0)) {
++		throw new Error('TicketBridge returned an invalid Evidence size');
++	}
++	return {
++		jobId,
++		kind: value.kind,
++		targetId: positiveInteger(value.target_id),
++		caseId,
++		platform: typeof value.platform === 'string' ? value.platform : '',
++		status,
++		createdTs: finiteTimestamp(value.created_ts),
++		updatedTs: finiteTimestamp(value.updated_ts),
++		error: typeof value.error === 'string' ? value.error : '',
++		flows: result && Array.isArray(result.artifacts) ? result.artifacts.map(parseFlow) : [],
++		evidenceId: optionalPositiveInteger(result?.evidence_id),
++		filename: typeof result?.filename === 'string' ? result.filename : '',
++		sha256: typeof result?.sha256 === 'string' ? result.sha256 : '',
++		size
++	};
++};
++
++export const parseVelociraptorJobHistory = (
++	payload: unknown,
++	caseId: number
++): VelociraptorJob[] => {
++	const expectedCaseId = positiveInteger(caseId);
++	if (!isRecord(payload) || payload.ok !== true || !Array.isArray(payload.jobs)) {
++		throw new Error('TicketBridge returned an invalid collection history');
++	}
++	return payload.jobs
++		.map((job) => parseJob(job, expectedCaseId))
++		.sort((left, right) => right.createdTs - left.createdTs);
++};
 diff --git a/src/lib/utils/velociraptor.ts b/src/lib/utils/velociraptor.ts
 new file mode 100644
 index 0000000..4a83dcf
@@ -417,7 +689,7 @@ index 0000000..4a83dcf
 +	};
 +};
 diff --git a/src/routes/(app)/alerts/+page.svelte b/src/routes/(app)/alerts/+page.svelte
-index 1272eef..0a7163d 100644
+index fc9a768..e2c8768 100644
 --- a/src/routes/(app)/alerts/+page.svelte
 +++ b/src/routes/(app)/alerts/+page.svelte
 @@ -85,6 +85,7 @@
@@ -428,7 +700,7 @@ index 1272eef..0a7163d 100644
  	import AlertsMergeDialog, {
  		type MergeAlertPayload,
  		type MergeMode
-@@ -379,6 +380,8 @@
+@@ -374,6 +375,8 @@
  	// case, "Merge" folds the alerts into an existing one.
  	let mergeMode = $state<MergeMode>('new');
  	let showClose = $state(false);
@@ -437,7 +709,7 @@ index 1272eef..0a7163d 100644
  
  	const perPageOptions = [5, 10, 25, 50, 100, 200, 500].map((n) => ({
  		value: String(n),
-@@ -1714,6 +1717,7 @@
+@@ -1667,6 +1670,7 @@
  					!showAlertEdit &&
  					!showAlertHistory &&
  					!showConfirmDelete &&
@@ -445,7 +717,7 @@ index 1272eef..0a7163d 100644
  					!reassignOpen}
  				onToggleSort={toggleSort}
  				onSelect={(alert_id, checked) => {
-@@ -1745,6 +1749,10 @@
+@@ -1698,6 +1702,10 @@
  					selected = { ...selected, [alert.alert_id]: true };
  					showClose = true;
  				}}
@@ -456,7 +728,7 @@ index 1272eef..0a7163d 100644
  				onSetStatus={async (alert, alert_status_id) => {
  					// Writes straight to the one alert rather than going through
  					// `setStatus`, which works off the selection and clears it
-@@ -1912,6 +1920,10 @@
+@@ -1865,6 +1873,10 @@
  											mergeMode = 'new';
  											showMerge = true;
  										}}
@@ -467,7 +739,7 @@ index 1272eef..0a7163d 100644
  										onShowClose={(withNote: boolean) => {
  											selected = { ...selected, [alert.alert_id]: true };
  
-@@ -1979,6 +1991,20 @@
+@@ -1932,6 +1944,20 @@
  	/>
  {/if}
  
@@ -720,12 +992,33 @@ index f232f20..b89bf0b 100644
  <RequestReviewDialog bind:open={showRequestReview} onConfirm={(admin) => setReviewer(admin)} />
  <CaseReportDialog bind:open={showReport} caseId={Number(page.params.case_id)} {reportType} />
 +<VelociraptorCollectDialog bind:open={showVelociraptor} caseId={Number(page.params.case_id)} />
+diff --git a/src/routes/(app)/case/[case_id]/+page.svelte b/src/routes/(app)/case/[case_id]/+page.svelte
+index e75e444..f214736 100644
+--- a/src/routes/(app)/case/[case_id]/+page.svelte
++++ b/src/routes/(app)/case/[case_id]/+page.svelte
+@@ -45,6 +45,7 @@
+ 	import MarkDownPreview from '$lib/components/common/MarkDown/MarkDownPreview.svelte';
+ 	import ChipHoverHost from '$lib/components/common/MarkDown/ChipHoverHost.svelte';
+ 	import CaseWorkspace from './components/CaseWorkspace.svelte';
++	import VelociraptorJobsCard from './components/VelociraptorJobsCard.svelte';
+ 	import { editorLeaveReason, guardLeave } from '$lib/hooks/leave-guard';
+ 
+ 	const cases = getContext<CasesContext>(CASES_CTX);
+@@ -581,6 +582,8 @@
+ 				  preserves the note, and an open case carrying one still needs to
+ 				  explain itself — the heading and palette shift to say so.
+ 				-->
++				<VelociraptorJobsCard caseId={case_id} />
++
+ 				<AiSuggestionsPanel
+ 					entityType="case"
+ 					entityId={case_id}
 diff --git a/src/routes/(app)/case/[case_id]/components/VelociraptorCollectDialog.svelte b/src/routes/(app)/case/[case_id]/components/VelociraptorCollectDialog.svelte
 new file mode 100644
-index 0000000..f217a88
+index 0000000..c7f3e39
 --- /dev/null
 +++ b/src/routes/(app)/case/[case_id]/components/VelociraptorCollectDialog.svelte
-@@ -0,0 +1,893 @@
+@@ -0,0 +1,899 @@
 +<script lang="ts">
 +	import { getContext, untrack } from 'svelte';
 +	import {
@@ -882,12 +1175,17 @@ index 0000000..f217a88
 +		return 'linux';
 +	};
 +
-+	const selectPlatform = (platform: VelociraptorPlatformId) => {
++	const selectPlatform = (platform: VelociraptorPlatformId, preserveResult = false) => {
 +		if (!catalog) return;
 +		selectedPlatform = platform;
 +		selectedArtifacts = defaultVelociraptorArtifacts(catalog, platform);
 +		artifactSearch = '';
-+		resetConfirmation();
++		if (preserveResult) {
++			confirmed = false;
++			error = '';
++		} else {
++			resetConfirmation();
++		}
 +	};
 +
 +	const resolveClientForAsset = async (asset: Asset, sequence: number) => {
@@ -910,7 +1208,8 @@ index 0000000..f217a88
 +			}
 +			const resolved = parseVelociraptorResolvedClient(raw);
 +			if (sequence !== resolveSequence || selectedAssetId !== String(asset.asset_id)) return;
-+			selectPlatform(resolved.platform);
++			// A slow resolver must not erase a completed job restored in parallel.
++			selectPlatform(resolved.platform, true);
 +			clientId = resolved.clientId;
 +			clientIdSource = 'velociraptor';
 +		} catch (cause) {
@@ -1619,35 +1918,205 @@ index 0000000..f217a88
 +		</Dialog.Footer>
 +	</Dialog.Content>
 +</Dialog.Root>
---- a/src/routes/(app)/case/[case_id]/components/VelociraptorCollectDialog.svelte
-+++ b/src/routes/(app)/case/[case_id]/components/VelociraptorCollectDialog.svelte
-@@ -154,12 +154,17 @@
- 		return 'linux';
- 	};
- 
--	const selectPlatform = (platform: VelociraptorPlatformId) => {
-+	const selectPlatform = (platform: VelociraptorPlatformId, preserveResult = false) => {
- 		if (!catalog) return;
- 		selectedPlatform = platform;
- 		selectedArtifacts = defaultVelociraptorArtifacts(catalog, platform);
- 		artifactSearch = '';
--		resetConfirmation();
-+		if (preserveResult) {
-+			confirmed = false;
-+			error = '';
-+		} else {
-+			resetConfirmation();
+diff --git a/src/routes/(app)/case/[case_id]/components/VelociraptorJobsCard.svelte b/src/routes/(app)/case/[case_id]/components/VelociraptorJobsCard.svelte
+new file mode 100644
+index 0000000..3f4a0b4
+--- /dev/null
++++ b/src/routes/(app)/case/[case_id]/components/VelociraptorJobsCard.svelte
+@@ -0,0 +1,196 @@
++<script lang="ts">
++	import { onDestroy, untrack } from 'svelte';
++	import {
++		ExternalLinkIcon,
++		FileArchiveIcon,
++		HardDriveUploadIcon,
++		Loader2Icon,
++		RefreshCwIcon
++	} from 'lucide-svelte';
++	import Button from '$lib/components/ui/button/button.svelte';
++	import {
++		parseVelociraptorJobHistory,
++		velociraptorEvidenceHref,
++		velociraptorIncidentJobsUrl,
++		velociraptorJobIsActive,
++		velociraptorJobStatusClass,
++		velociraptorJobStatusLabel,
++		type VelociraptorJob
++	} from '$lib/utils/velociraptor-jobs';
++
++	type Props = { caseId: number };
++	let { caseId }: Props = $props();
++
++	const jobsEndpoint = '__TB_URL__/velociraptor/jobs?key=__TB_KEY__';
++	let jobs = $state<VelociraptorJob[]>([]);
++	let loading = $state(false);
++	let error = $state('');
++	let loadedCaseId = 0;
++	let requestSequence = 0;
++	let pollTimer: ReturnType<typeof setTimeout> | null = null;
++
++	const clearPoll = () => {
++		if (pollTimer !== null) clearTimeout(pollTimer);
++		pollTimer = null;
++	};
++
++	const load = async (id: number, preserveJobs = true) => {
++		const sequence = ++requestSequence;
++		clearPoll();
++		loading = true;
++		error = '';
++		if (!preserveJobs) jobs = [];
++		try {
++			const response = await fetch(velociraptorIncidentJobsUrl(jobsEndpoint, id), {
++				headers: { Accept: 'application/json' }
++			});
++			const payload = (await response.json().catch(() => null)) as unknown;
++			if (sequence !== requestSequence) return;
++			if (!response.ok) throw new Error(`Collection history returned HTTP ${response.status}`);
++			jobs = parseVelociraptorJobHistory(payload, id);
++			if (jobs.some((job) => velociraptorJobIsActive(job.status))) {
++				pollTimer = setTimeout(() => {
++					if (sequence === requestSequence) void load(id);
++				}, 2000);
++			}
++		} catch (cause) {
++			if (sequence === requestSequence) {
++				error = cause instanceof Error ? cause.message : 'Failed to load Velociraptor jobs';
++			}
++		} finally {
++			if (sequence === requestSequence) loading = false;
 +		}
- 	};
- 
- 	const resolveClientForAsset = async (asset: Asset, sequence: number) => {
-@@ -182,7 +187,8 @@
- 			}
- 			const resolved = parseVelociraptorResolvedClient(raw);
- 			if (sequence !== resolveSequence || selectedAssetId !== String(asset.asset_id)) return;
--			selectPlatform(resolved.platform);
-+			// A slow resolver must not erase a completed job restored in parallel.
-+			selectPlatform(resolved.platform, true);
- 			clientId = resolved.clientId;
- 			clientIdSource = 'velociraptor';
- 		} catch (cause) {
++	};
++
++	$effect(() => {
++		const id = caseId;
++		untrack(() => {
++			if (!Number.isSafeInteger(id) || id <= 0 || id === loadedCaseId) return;
++			loadedCaseId = id;
++			void load(id, false);
++		});
++	});
++
++	onDestroy(() => {
++		requestSequence += 1;
++		clearPoll();
++	});
++</script>
++
++{#if jobs.length > 0 || error}
++	<section
++		class="mx-5 mt-3 shrink-0 rounded-md border border-border/60 bg-muted/20"
++		aria-label="Velociraptor triage jobs"
++		data-testid="velociraptor-jobs-card"
++	>
++		<header class="flex items-center justify-between gap-3 border-b border-border/50 px-3 py-2">
++			<div class="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide">
++				<HardDriveUploadIcon size={13} class="text-sky-600 dark:text-sky-400" />
++				Velociraptor triage
++			</div>
++			<Button
++				variant="ghost"
++				size="xs"
++				disabled={loading}
++				onclick={() => void load(caseId)}
++				title="Refresh Velociraptor jobs"
++				data-testid="velociraptor-jobs-refresh"
++			>
++				<RefreshCwIcon size={12} class={loading ? 'animate-spin' : ''} />
++				Refresh
++			</Button>
++		</header>
++
++		{#if error}
++			<p
++				class="border-b border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive"
++				role="alert"
++			>
++				{error}
++			</p>
++		{/if}
++
++		<div class="divide-y divide-border/50">
++			{#each jobs.slice(0, 3) as job (job.jobId)}
++				<article
++					class="space-y-2 px-3 py-2.5 text-xs"
++					data-testid={`velociraptor-job-${job.jobId}`}
++				>
++					<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
++						<span
++							class={`rounded-full border px-2 py-0.5 font-medium ${velociraptorJobStatusClass(job.status)}`}
++						>
++							{velociraptorJobStatusLabel(job.status)}
++						</span>
++						<span class="text-muted-foreground">
++							{job.kind === 'alert' ? `From alert #${job.targetId}` : 'From this incident'}
++							{#if job.platform}
++								· {job.platform}{/if}
++						</span>
++						<time
++							class="ml-auto text-muted-foreground"
++							datetime={new Date(job.createdTs * 1000).toISOString()}
++						>
++							{new Date(job.createdTs * 1000).toLocaleString()}
++						</time>
++					</div>
++
++					<div class="break-all font-mono text-[11px] text-muted-foreground">
++						Job ID: <span class="select-all text-foreground">{job.jobId}</span>
++					</div>
++
++					{#if job.flows.length > 0}
++						<div class="flex flex-wrap gap-x-3 gap-y-1">
++							{#each job.flows as flow (flow.flowId)}
++								<a
++									class="inline-flex items-center gap-1 break-all text-primary underline"
++									href={flow.flowLink}
++									target="_blank"
++									rel="noopener noreferrer"
++								>
++									{flow.artifact} · {flow.flowId}
++									{#if flow.state}
++										· {flow.state}{/if} · {flow.rowCount} rows
++									<ExternalLinkIcon size={11} class="shrink-0" />
++								</a>
++							{/each}
++						</div>
++					{/if}
++
++					{#if job.evidenceId}
++						<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
++							<Button
++								variant="outline"
++								size="xs"
++								href={velociraptorEvidenceHref(job.caseId, job.evidenceId)}
++								data-testid={`velociraptor-evidence-${job.evidenceId}`}
++							>
++								<FileArchiveIcon size={12} />
++								Evidence #{job.evidenceId}
++							</Button>
++							{#if job.filename}<span class="break-all text-muted-foreground">{job.filename}</span
++								>{/if}
++						</div>
++					{/if}
++
++					{#if job.error}
++						<p class="break-words text-destructive">{job.error}</p>
++					{/if}
++				</article>
++			{/each}
++		</div>
++
++		{#if jobs.length > 3}
++			<p class="border-t border-border/50 px-3 py-1.5 text-[11px] text-muted-foreground">
++				Showing the 3 most recent of {jobs.length} jobs.
++			</p>
++		{/if}
++		{#if loading && jobs.some((job) => velociraptorJobIsActive(job.status))}
++			<p
++				class="flex items-center gap-1 border-t border-border/50 px-3 py-1.5 text-[11px] text-muted-foreground"
++			>
++				<Loader2Icon size={11} class="animate-spin" /> Updating active jobs…
++			</p>
++		{/if}
++	</section>
++{/if}

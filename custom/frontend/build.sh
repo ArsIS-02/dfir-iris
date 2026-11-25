@@ -21,7 +21,8 @@ git -C "$WORK/source" apply "$ROOT/case-closed-at.patch"
 git -C "$WORK/source" apply "$ROOT/incident-terminology.patch"
 sed -i -e "s/__TB_KEY__/${TB_KEY}/g" \
   -e "s#__TB_URL__#${TB_TICKETBRIDGE_URL%/}#g" \
-  "$WORK/source/src/routes/(app)/case/[case_id]/components/VelociraptorCollectDialog.svelte"
+  "$WORK/source/src/routes/(app)/case/[case_id]/components/VelociraptorCollectDialog.svelte" \
+  "$WORK/source/src/routes/(app)/case/[case_id]/components/VelociraptorJobsCard.svelte"
 ! grep -rqE '__TB_(KEY|URL)__' "$WORK/source/src"
 
 podman build --tag "$IMAGE" "$WORK/source"
