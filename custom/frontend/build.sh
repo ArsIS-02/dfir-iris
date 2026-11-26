@@ -38,6 +38,7 @@ git -C "$WORK/source" apply "$ROOT/case-velociraptor.patch"
 git -C "$WORK/source" apply "$ROOT/case-opened-at.patch"
 git -C "$WORK/source" apply "$ROOT/case-closed-at.patch"
 git -C "$WORK/source" apply "$ROOT/incident-terminology.patch"
+git -C "$WORK/source" apply "$ROOT/evidence-download.patch"
 sed -i -e "s/__TB_KEY__/${TB_KEY}/g" \
   -e "s#__TB_URL__#${TB_TICKETBRIDGE_URL%/}#g" \
   "$WORK/source/src/routes/(app)/case/[case_id]/components/VelociraptorCollectDialog.svelte" \

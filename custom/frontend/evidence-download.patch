@@ -1,0 +1,287 @@
+diff --git a/src/lib/services/__tests__/case-datastore.service.test.ts b/src/lib/services/__tests__/case-datastore.service.test.ts
+index e017ac4..6f63542 100644
+--- a/src/lib/services/__tests__/case-datastore.service.test.ts
++++ b/src/lib/services/__tests__/case-datastore.service.test.ts
+@@ -319,6 +319,70 @@ describe('CaseDatastoreService', () => {
+ 		});
+ 	});
+ 
++	// -----------------------------------------------------------------------
++	// fetchFileBlobUrl() — authenticated binary download
++	// -----------------------------------------------------------------------
++
++	describe('fetchFileBlobUrl()', () => {
++		const createObjectURL = vi.fn();
++		const originalCreateObjectURL = Object.getOwnPropertyDescriptor(URL, 'createObjectURL');
++
++		beforeEach(() => {
++			createObjectURL.mockReturnValue('blob:triage');
++			Object.defineProperty(URL, 'createObjectURL', {
++				configurable: true,
++				writable: true,
++				value: createObjectURL
++			});
++		});
++
++		afterEach(() => {
++			if (originalCreateObjectURL) {
++				Object.defineProperty(URL, 'createObjectURL', originalCreateObjectURL);
++			} else {
++				Reflect.deleteProperty(URL, 'createObjectURL');
++			}
++		});
++
++		it('fetches the file with authorization and returns a blob URL and filename', async () => {
++			const { auth } = await import('$lib/stores/auth.store');
++			vi.mocked(auth.getAccessToken).mockReturnValue('test-token');
++			global.fetch = vi.fn().mockResolvedValueOnce({
++				ok: true,
++				headers: new Headers({ 'Content-Disposition': 'attachment; filename="triage.zip"' }),
++				blob: vi.fn().mockResolvedValueOnce(new Blob(['zip-content']))
++			} as unknown as Response);
++
++			const result = await CaseDatastoreService.fetchFileBlobUrl(90, 114);
++
++			expect(global.fetch).toHaveBeenCalledWith('/api/v2/cases/90/datastore/files/114', {
++				headers: { Accept: '*/*', Authorization: 'Bearer test-token' },
++				credentials: 'include'
++			});
++			expect(createObjectURL).toHaveBeenCalledOnce();
++			expect(result).toEqual({ url: 'blob:triage', filename: 'triage.zip' });
++		});
++
++		it('does not create an empty download when the server rejects the request', async () => {
++			global.fetch = vi.fn().mockResolvedValueOnce({ ok: false } as Response);
++
++			expect(await CaseDatastoreService.fetchFileBlobUrl(90, 114)).toBeNull();
++			expect(createObjectURL).not.toHaveBeenCalled();
++		});
++
++		it('reports network and truncated-body failures without creating a blob URL', async () => {
++			global.fetch = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'));
++			expect(await CaseDatastoreService.fetchFileBlobUrl(90, 114)).toBeNull();
++
++			global.fetch = vi.fn().mockResolvedValueOnce({
++				ok: true,
++				headers: new Headers(),
++				blob: vi.fn().mockRejectedValueOnce(new TypeError('Truncated response'))
++			} as unknown as Response);
++			expect(await CaseDatastoreService.fetchFileBlobUrl(90, 114)).toBeNull();
++		});
++	});
++
+ 	// -----------------------------------------------------------------------
+ 	// uploadFile() / updateFile() — multipart, mocked via global.fetch
+ 	// -----------------------------------------------------------------------
+diff --git a/src/lib/utils/__tests__/evidence-download.test.ts b/src/lib/utils/__tests__/evidence-download.test.ts
+new file mode 100644
+index 0000000..af0bbd8
+--- /dev/null
++++ b/src/lib/utils/__tests__/evidence-download.test.ts
+@@ -0,0 +1,32 @@
++import { describe, expect, it } from 'vitest';
++import { evidenceDownloadLabel, findEvidenceDatastoreFile } from '../evidence-download';
++
++const datastoreFile = (file_sha256: string | null, file_is_evidence = true) => ({
++	file_sha256,
++	file_is_evidence
++});
++
++describe('Evidence datastore download', () => {
++	it('matches the source file by SHA-256 rather than numeric object IDs', () => {
++		const files = [datastoreFile('AA-BB'), datastoreFile('cc-dd')];
++
++		expect(findEvidenceDatastoreFile(files, { file_hash: 'CC-DD' })).toBe(files[1]);
++	});
++
++	it('requires a datastore file explicitly marked as evidence', () => {
++		const files = [datastoreFile('AA-BB', false)];
++
++		expect(findEvidenceDatastoreFile(files, { file_hash: 'aa-bb' })).toBeNull();
++	});
++
++	it('does not offer a download without a confirmed hash match', () => {
++		expect(findEvidenceDatastoreFile([datastoreFile('AA-BB')], { file_hash: null })).toBeNull();
++		expect(findEvidenceDatastoreFile([datastoreFile(null)], { file_hash: 'AA-BB' })).toBeNull();
++		expect(findEvidenceDatastoreFile([], { file_hash: 'AA-BB' })).toBeNull();
++	});
++
++	it('labels ZIP downloads explicitly and preserves other file types', () => {
++		expect(evidenceDownloadLabel('case-90-triage.ZIP')).toBe('Download ZIP');
++		expect(evidenceDownloadLabel('timeline.csv')).toBe('Download file');
++	});
++});
+diff --git a/src/lib/utils/evidence-download.ts b/src/lib/utils/evidence-download.ts
+new file mode 100644
+index 0000000..c9ea400
+--- /dev/null
++++ b/src/lib/utils/evidence-download.ts
+@@ -0,0 +1,28 @@
++import type { Evidence } from '$lib/types/resources/evidence';
++import type { DataStoreFile } from '$lib/types/resources/datastore';
++
++type EvidenceIdentity = Pick<Evidence, 'file_hash'>;
++type DatastoreFileIdentity = Pick<DataStoreFile, 'file_sha256' | 'file_is_evidence'>;
++
++/**
++ * Evidence registry IDs and datastore file IDs are independent. The backend
++ * links an imported evidence to its source by SHA-256, so never assume that
++ * equal numeric IDs identify the same object.
++ */
++export const findEvidenceDatastoreFile = <T extends DatastoreFileIdentity>(
++	files: T[],
++	evidence: EvidenceIdentity | null | undefined
++): T | null => {
++	const expectedHash = evidence?.file_hash?.trim().toLowerCase();
++	if (!expectedHash) return null;
++
++	return (
++		files.find(
++			(file) =>
++				file.file_is_evidence === true && file.file_sha256?.trim().toLowerCase() === expectedHash
++		) ?? null
++	);
++};
++
++export const evidenceDownloadLabel = (filename: string): string =>
++	filename.trim().toLowerCase().endsWith('.zip') ? 'Download ZIP' : 'Download file';
+diff --git a/src/routes/(app)/case/[case_id]/evidence/[evidence_id]/EvidenceDetailView.svelte b/src/routes/(app)/case/[case_id]/evidence/[evidence_id]/EvidenceDetailView.svelte
+index 55fb3b5..4875264 100644
+--- a/src/routes/(app)/case/[case_id]/evidence/[evidence_id]/EvidenceDetailView.svelte
++++ b/src/routes/(app)/case/[case_id]/evidence/[evidence_id]/EvidenceDetailView.svelte
+@@ -9,8 +9,10 @@
+ 	import { fade } from 'svelte/transition';
+ 	import {
+ 		AlertTriangleIcon,
++		DownloadIcon,
+ 		FileLock2Icon,
+ 		InfoIcon,
++		LoaderCircleIcon,
+ 		MessagesSquareIcon,
+ 		SearchIcon,
+ 		WaypointsIcon
+@@ -42,6 +44,10 @@
+ 		CASE_ACCESS_CTX,
+ 		type CaseAccessContext
+ 	} from '$lib/contexts/case-access.context.svelte';
++	import { DATASTORE_CTX, type DatastoreContext } from '$lib/contexts/datastore.context';
++	import { datastoreDownloadBlobUrl } from '$lib/components/common/Datastore/datastore-actions';
++	import { Button } from '$lib/components/ui/button';
++	import { evidenceDownloadLabel, findEvidenceDatastoreFile } from '$lib/utils/evidence-download';
+ 
+ 	type EditData = {
+ 		filename: string;
+@@ -64,14 +70,20 @@
+ 
+ 	const caseEvidences = getContext<CaseEvidencesContext>(CASE_EVIDENCES_CTX);
+ 	const caseAccess = getContext<CaseAccessContext | undefined>(CASE_ACCESS_CTX);
++	const datastore = getContext<DatastoreContext>(DATASTORE_CTX);
+ 	const canEdit = $derived(caseAccess?.canEdit() ?? false);
+ 
+ 	const evidence = $derived(caseEvidences.byId[evidenceId]);
++	const datastoreFile = $derived(
++		findEvidenceDatastoreFile(Object.values(datastore.fileById), evidence)
++	);
++	const downloadLabel = $derived(evidenceDownloadLabel(evidence?.filename ?? ''));
+ 
+ 	let activeTab = $state('details');
+ 	let isEditing = $state(false);
+ 	let isSaving = $state(false);
+ 	let isLoading = $state(true);
++	let isDownloading = $state(false);
+ 	let loadError = $state<string | null>(null);
+ 
+ 	let comments = $state<Comment[]>([]);
+@@ -224,11 +236,41 @@
+ 		onAfterDelete?.();
+ 	};
+ 
++	const downloadEvidence = async () => {
++		const currentEvidence = evidence;
++		const currentFile = datastoreFile;
++		if (!currentEvidence || !currentFile || isDownloading) return;
++
++		isDownloading = true;
++		try {
++			const fetched = await datastore.fetchFileBlobUrl(currentFile.file_id);
++			datastoreDownloadBlobUrl(
++				fetched?.url ?? null,
++				currentEvidence.filename || fetched?.filename || currentFile.file_original_name
++			);
++		} catch {
++			toast({
++				title: 'Could not download file',
++				description: 'The file could not be downloaded from Datastore.',
++				variant: 'destructive'
++			});
++		} finally {
++			isDownloading = false;
++		}
++	};
++
+ 	$effect(() => {
+ 		void evidenceId;
+ 		loadEvidence();
+ 	});
+ 
++	let datastoreRequestedForCase: number | null = null;
++	$effect(() => {
++		if (!evidence?.file_hash || datastoreRequestedForCase === caseId) return;
++		datastoreRequestedForCase = caseId;
++		void datastore.loadTree({ fetch });
++	});
++
+ 	onMount(() => {
+ 		void ensureHasCustomAttributes('evidence');
+ 	});
+@@ -285,6 +327,26 @@
+ 				objectId={evidence.id}
+ 			/>
+ 
++			{#if datastoreFile}
++				<div class="flex shrink-0 justify-end px-4 pb-2">
++					<Button
++						variant="outline"
++						size="sm"
++						onclick={downloadEvidence}
++						disabled={isDownloading}
++						title="Download the original file from Datastore"
++					>
++						{#if isDownloading}
++							<LoaderCircleIcon class="h-4 w-4 animate-spin" />
++							Downloading...
++						{:else}
++							<DownloadIcon class="h-4 w-4" />
++							{downloadLabel}
++						{/if}
++					</Button>
++				</div>
++			{/if}
++
+ 			<div class="flex min-h-0 flex-1 flex-col p-0">
+ 				<Tabs bind:value={activeTab} class="flex min-h-0 flex-1 flex-col">
+ 					<div class="shrink-0 border-b">
+diff --git a/src/routes/(app)/case/[case_id]/evidence/components/evidence-sidebar.svelte b/src/routes/(app)/case/[case_id]/evidence/components/evidence-sidebar.svelte
+index 348274b..e811ddf 100644
+--- a/src/routes/(app)/case/[case_id]/evidence/components/evidence-sidebar.svelte
++++ b/src/routes/(app)/case/[case_id]/evidence/components/evidence-sidebar.svelte
+@@ -414,11 +414,17 @@
+ 			<TooltipProvider>
+ 				<Tooltip>
+ 					<TooltipTrigger>
+-						<Button size="icon" variant="ghost" onclick={() => (showDownloadModal = true)}>
++						<Button
++							size="icon"
++							variant="ghost"
++							title="Export Evidence list as CSV"
++							aria-label="Export Evidence list as CSV"
++							onclick={() => (showDownloadModal = true)}
++						>
+ 							<DownloadCloudIcon size={16} />
+ 						</Button>
+ 					</TooltipTrigger>
+-					<TooltipContent align="center" side="bottom">Download as CSV</TooltipContent>
++					<TooltipContent align="center" side="bottom">Export Evidence list as CSV</TooltipContent>
+ 				</Tooltip>
+ 			</TooltipProvider>
+ 		</div>
