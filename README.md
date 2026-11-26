@@ -228,13 +228,20 @@ Collect with Velociraptor**. Команда открывает диалог вн
 Для запуска из алерта после завершения добавляется комментарий со статусом, Job ID, Evidence ID,
 SHA-256 и ссылками на Flow. Live-проверки 25.11.2026: сбор из инцидента №90 создал Evidence №113,
 сбор из алерта №1431 — Evidence №114; восстановление обоих результатов подтверждено. Контролируемый
-сбой доставки `evidence_error` на production не проводился.
+сбой доставки `evidence_error` на production специально не создавался; сценарий проверен автотестами.
 
 На вкладке **Summary** инцидента компонент `VelociraptorJobsCard.svelte` показывает до трёх последних
 задач обоих типов через `GET /velociraptor/jobs?incident_id=...`: Job ID, статус, Flow и прямую ссылку
 на Evidence. **Refresh** только перечитывает историю и не создаёт новый Flow; автоматический опрос идёт
 только для активных задач. При пустой истории карточка не отображается. В `build.sh` подстановка
 `TB_KEY` и `TB_TICKETBRIDGE_URL` выполняется и для диалога, и для этой карточки.
+
+Для `evidence_error` с сохранённым recovery-архивом карточка дополнительно показывает **Retry Evidence
+upload**. После подтверждения вызывается `POST /velociraptor/jobs/{job_id}/retry-evidence`: TicketBridge
+проверяет размер и SHA-256 сохранённого ZIP и повторяет только прикрепление Evidence, не создавая новый
+Flow. При повторной ошибке recovery ZIP и исходные Flow сохраняются; после успеха Evidence ID и исходный
+итог сбора восстанавливаются, а recovery-архив удаляется. Для старых задач без архива API возвращает
+HTTP 409 вместо неявного нового сбора.
 
 **Обязательное условие:** в **Settings → Custom Attributes → Assets** должна быть объявлена
 вкладка `velociraptor` с полем `client_id` типа `input_string` (`value: ""`, `mandatory: false`).
@@ -248,8 +255,8 @@ SHA-256 и ссылками на Flow. Live-проверки 25.11.2026: сбо�
 а внешний reverse-proxy направляет этот путь в TicketBridge. Это устраняет отдельные CORS- и CSP-проверки.
 Для прямого междоменного подключения вместо `/` указывается полный origin TicketBridge. Например:
 `TB_KEY='<secret>' TB_TICKETBRIDGE_URL='/' bash custom/frontend/build.sh`.
-Полный набор: **3197 тестов в 241 файле**; `npm run check` — 0 ошибок (10 исходных предупреждений),
-production `npm run build` успешна. Backend TicketBridge: **237 тестов**.
+Полный набор: **3199 тестов в 241 файле**; `npm run check` — 0 ошибок (10 исходных предупреждений),
+production `npm run build` успешна. Backend TicketBridge: **242 теста**.
 Все пять frontend-патчей проверены командой `git apply --check` относительно закреплённого upstream. Браузер
 получает имена только из серверного каталога; состав allowlist и builders дополнительно проверен
 offline- и HTTP-тестами, включая отклонение кросс-платформенного выбора.

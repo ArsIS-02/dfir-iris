@@ -1,14 +1,15 @@
 diff --git a/src/lib/utils/__tests__/velociraptor-jobs.test.ts b/src/lib/utils/__tests__/velociraptor-jobs.test.ts
 new file mode 100644
-index 0000000..7a90930
+index 0000000..0cd27d6
 --- /dev/null
 +++ b/src/lib/utils/__tests__/velociraptor-jobs.test.ts
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,114 @@
 +import { describe, expect, it } from 'vitest';
 +import {
 +	parseVelociraptorJobHistory,
 +	safeVelociraptorHttpUrl,
 +	velociraptorEvidenceHref,
++	velociraptorEvidenceRetryUrl,
 +	velociraptorIncidentJobsUrl,
 +	velociraptorJobIsActive,
 +	velociraptorJobStatusLabel
@@ -79,6 +80,33 @@ index 0000000..7a90930
 +		expect(safeVelociraptorHttpUrl('http://velociraptor.example.test/F.TEST')).toBe(
 +			'http://velociraptor.example.test/F.TEST'
 +		);
++	});
++
++	it('builds a keyed Evidence-only retry endpoint for a valid job', () => {
++		const id = 'a'.repeat(32);
++		expect(velociraptorEvidenceRetryUrl('/velociraptor/jobs?key=test', id)).toBe(
++			`/velociraptor/jobs/${id}/retry-evidence?key=test`
++		);
++		expect(() => velociraptorEvidenceRetryUrl('/velociraptor/collect?key=test', id)).toThrow(
++			'jobs endpoint'
++		);
++		expect(() => velociraptorEvidenceRetryUrl('/velociraptor/jobs?key=test', 'bad')).toThrow(
++			'Job ID'
++		);
++	});
++
++	it('exposes recovery only when TicketBridge confirms a saved package', () => {
++		const original = job('a'.repeat(32), 100);
++		const recoverable = {
++			...original,
++			status: 'evidence_error',
++			result: { ...original.result, recovery_available: true }
++		};
++		const legacy = job('b'.repeat(32), 200);
++		legacy.status = 'evidence_error';
++		const parsed = parseVelociraptorJobHistory({ ok: true, jobs: [recoverable, legacy] }, 90);
++		expect(parsed[0].recoveryAvailable).toBe(false);
++		expect(parsed[1].recoveryAvailable).toBe(true);
 +	});
 +
 +	it('polls only active jobs and keeps terminal status labels explicit', () => {
@@ -294,10 +322,10 @@ index 0000000..90e298d
 +});
 diff --git a/src/lib/utils/velociraptor-jobs.ts b/src/lib/utils/velociraptor-jobs.ts
 new file mode 100644
-index 0000000..bc5701d
+index 0000000..89be63c
 --- /dev/null
 +++ b/src/lib/utils/velociraptor-jobs.ts
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,187 @@
 +export const VELOCIRAPTOR_ACTIVE_JOB_STATUSES = ['queued', 'collecting', 'uploading'] as const;
 +
 +export const VELOCIRAPTOR_JOB_STATUSES = [
@@ -334,6 +362,7 @@ index 0000000..bc5701d
 +	filename: string;
 +	sha256: string;
 +	size: number | null;
++	recoveryAvailable: boolean;
 +};
 +
 +const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -386,6 +415,17 @@ index 0000000..bc5701d
 +
 +export const velociraptorEvidenceHref = (caseId: number, evidenceId: number): string =>
 +	`/case/${positiveInteger(caseId)}/evidence/${positiveInteger(evidenceId)}`;
++
++export const velociraptorEvidenceRetryUrl = (endpoint: string, jobId: string): string => {
++	if (!/^[0-9a-f]{32}$/.test(jobId)) throw new Error('Invalid Velociraptor Job ID');
++	const separator = endpoint.indexOf('?');
++	const base = separator >= 0 ? endpoint.slice(0, separator) : endpoint;
++	const query = separator >= 0 ? endpoint.slice(separator) : '';
++	if (!base.endsWith('/velociraptor/jobs')) {
++		throw new Error('Invalid Velociraptor jobs endpoint');
++	}
++	return `${base}/${jobId}/retry-evidence${query}`;
++};
 +
 +export const velociraptorJobIsActive = (status: VelociraptorJobStatus): boolean =>
 +	(VELOCIRAPTOR_ACTIVE_JOB_STATUSES as readonly string[]).includes(status);
@@ -456,7 +496,8 @@ index 0000000..bc5701d
 +		evidenceId: optionalPositiveInteger(result?.evidence_id),
 +		filename: typeof result?.filename === 'string' ? result.filename : '',
 +		sha256: typeof result?.sha256 === 'string' ? result.sha256 : '',
-+		size
++		size,
++		recoveryAvailable: result?.recovery_available === true
 +	};
 +};
 +
@@ -1920,10 +1961,10 @@ index 0000000..c7f3e39
 +</Dialog.Root>
 diff --git a/src/routes/(app)/case/[case_id]/components/VelociraptorJobsCard.svelte b/src/routes/(app)/case/[case_id]/components/VelociraptorJobsCard.svelte
 new file mode 100644
-index 0000000..3f4a0b4
+index 0000000..0d7ac64
 --- /dev/null
 +++ b/src/routes/(app)/case/[case_id]/components/VelociraptorJobsCard.svelte
-@@ -0,0 +1,196 @@
+@@ -0,0 +1,256 @@
 +<script lang="ts">
 +	import { onDestroy, untrack } from 'svelte';
 +	import {
@@ -1937,6 +1978,7 @@ index 0000000..3f4a0b4
 +	import {
 +		parseVelociraptorJobHistory,
 +		velociraptorEvidenceHref,
++		velociraptorEvidenceRetryUrl,
 +		velociraptorIncidentJobsUrl,
 +		velociraptorJobIsActive,
 +		velociraptorJobStatusClass,
@@ -1950,6 +1992,7 @@ index 0000000..3f4a0b4
 +	const jobsEndpoint = '__TB_URL__/velociraptor/jobs?key=__TB_KEY__';
 +	let jobs = $state<VelociraptorJob[]>([]);
 +	let loading = $state(false);
++	let retryingJobId = $state('');
 +	let error = $state('');
 +	let loadedCaseId = 0;
 +	let requestSequence = 0;
@@ -1985,6 +2028,43 @@ index 0000000..3f4a0b4
 +			}
 +		} finally {
 +			if (sequence === requestSequence) loading = false;
++		}
++	};
++
++	const retryEvidence = async (job: VelociraptorJob) => {
++		if (retryingJobId || job.status !== 'evidence_error' || !job.recoveryAvailable) return;
++		const confirmed = window.confirm(
++			'Upload the saved Evidence ZIP to this incident? This will not start a new Velociraptor collection.'
++		);
++		if (!confirmed) return;
++		const sequence = ++requestSequence;
++		clearPoll();
++		retryingJobId = job.jobId;
++		error = '';
++		try {
++			const response = await fetch(velociraptorEvidenceRetryUrl(jobsEndpoint, job.jobId), {
++				method: 'POST',
++				headers: {
++					Accept: 'application/json',
++					'Content-Type': 'application/x-www-form-urlencoded'
++				},
++				body: 'confirm=yes'
++			});
++			const payload = (await response.json().catch(() => null)) as {
++				ok?: boolean;
++				error?: string;
++			} | null;
++			if (sequence !== requestSequence) return;
++			if (!response.ok || payload?.ok !== true) {
++				throw new Error(payload?.error || `Evidence recovery returned HTTP ${response.status}`);
++			}
++			await load(caseId);
++		} catch (cause) {
++			if (sequence === requestSequence) {
++				error = cause instanceof Error ? cause.message : 'Failed to recover Evidence upload';
++			}
++		} finally {
++			if (retryingJobId === job.jobId) retryingJobId = '';
 +		}
 +	};
 +
@@ -2096,6 +2176,27 @@ index 0000000..3f4a0b4
 +							</Button>
 +							{#if job.filename}<span class="break-all text-muted-foreground">{job.filename}</span
 +								>{/if}
++						</div>
++					{/if}
++
++					{#if job.status === 'evidence_error' && job.recoveryAvailable}
++						<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
++							<Button
++								variant="outline"
++								size="xs"
++								disabled={retryingJobId !== ''}
++								onclick={() => void retryEvidence(job)}
++								data-testid={`velociraptor-retry-${job.jobId}`}
++							>
++								{#if retryingJobId === job.jobId}
++									<Loader2Icon size={12} class="animate-spin" />
++									Uploading saved ZIP…
++								{:else}
++									<RefreshCwIcon size={12} />
++									Retry Evidence upload
++								{/if}
++							</Button>
++							<span class="text-muted-foreground">Uses the saved ZIP; no new Flow is started.</span>
 +						</div>
 +					{/if}
 +

@@ -25,6 +25,10 @@ class CaseVelociraptorPatchTests(unittest.TestCase):
         self.assertIn('<VelociraptorJobsCard caseId={case_id} />', text)
         self.assertIn('incident_id=${positiveInteger(caseId)}', text)
         self.assertIn('velociraptorEvidenceHref', text)
+        self.assertIn('velociraptorEvidenceRetryUrl', text)
+        self.assertIn('/retry-evidence', text)
+        self.assertIn("body: 'confirm=yes'", text)
+        self.assertIn('result?.recovery_available === true', text)
 
     def test_build_substitutes_both_components_without_committing_secrets(self):
         text = BUILD.read_text(encoding='utf-8')
