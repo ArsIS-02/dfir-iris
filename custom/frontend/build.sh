@@ -6,7 +6,26 @@ UPSTREAM_REF='3e02ba0d221235968b188c440faaeac4169f0714'
 IMAGE='localhost/iris-frontend-homelab:v3.0.0-beta.23-dfir'
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+
+storage_container_ids() {
+  podman ps -a --external --format '{{.ID}}|{{.Status}}' |
+    awk -F'|' '$2 == "Storage" {print $1}'
+}
+
+BUILD_CONTAINERS_BEFORE=$(storage_container_ids | sort)
+cleanup() {
+  rc=$?
+  trap - EXIT
+  rm -rf "$WORK" || true
+  # --force-rm handles normal build failures. This EXIT cleanup also removes
+  # storage containers left by this run if Podman could not remove them itself.
+  comm -13 \
+    <(printf '%s\n' "$BUILD_CONTAINERS_BEFORE" | sort) \
+    <(storage_container_ids | sort) |
+    xargs -r podman rm -f || true
+  exit "$rc"
+}
+trap cleanup EXIT
 
 : "${TB_KEY:?Set TB_KEY for the TicketBridge case action}"
 : "${TB_TICKETBRIDGE_URL:?Set TB_TICKETBRIDGE_URL for the TicketBridge case action}"
@@ -25,5 +44,5 @@ sed -i -e "s/__TB_KEY__/${TB_KEY}/g" \
   "$WORK/source/src/routes/(app)/case/[case_id]/components/VelociraptorJobsCard.svelte"
 ! grep -rqE '__TB_(KEY|URL)__' "$WORK/source/src"
 
-podman build --tag "$IMAGE" "$WORK/source"
+podman build --force-rm --tag "$IMAGE" "$WORK/source"
 printf 'Built %s from upstream %s + laboratory patches\n' "$IMAGE" "$UPSTREAM_REF"

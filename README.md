@@ -149,6 +149,11 @@ bash custom/frontend/build.sh
 podman-compose up -d frontend
 ```
 
+Сборка использует `podman build --force-rm`. Дополнительный EXIT trap сравнивает
+storage-контейнеры до и после запуска и удаляет только появившиеся во время этой
+сборки, если Podman оставил их после ошибки. Рабочие контейнеры, тома и общая
+очистка всех buildah-контейнеров (`buildah rm --all`) не используются.
+
 Проверки upstream с патчем: **3172 теста в 238 файлах**, `npm run check` — 0 ошибок
 (8 исходных предупреждений в других компонентах), production `npm run build` успешна.
 При обновлении IRIS нужно сменить закреплённую ревизию в `custom/frontend/build.sh`,
